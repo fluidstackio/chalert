@@ -61,8 +61,12 @@ type Config struct {
 	// resources. Default: 30s.
 	MaxQueryTime time.Duration
 
+	// MaxIdleConns limits the number of idle connections in each pool.
+	// Default: 5.
+	MaxIdleConns int
+
 	// MaxOpenConns limits the number of open connections in each pool.
-	// Default: 10.
+	// Default: MaxIdleConns + 5.
 	MaxOpenConns int
 
 	// MaxRowsToRead limits rows ClickHouse may read per query (server-side
@@ -148,8 +152,11 @@ func New(cfg Config) (*Client, error) {
 	if cfg.MaxQueryTime == 0 {
 		cfg.MaxQueryTime = 30 * time.Second
 	}
+	if cfg.MaxIdleConns == 0 {
+		cfg.MaxIdleConns = 5
+	}
 	if cfg.MaxOpenConns == 0 {
-		cfg.MaxOpenConns = 10
+		cfg.MaxOpenConns = cfg.MaxIdleConns + 5
 	}
 
 	// Build guard rail settings for the read connection.

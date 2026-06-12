@@ -73,11 +73,13 @@ var (
 	externalURL        = flag.String("external.url", "", "External URL for alert source links.")
 	maxRowsToRead      = flag.Int64("clickhouse.maxRowsToRead", 0, "Max rows ClickHouse may read per alert query. 0 means unlimited.")
 	maxThreads         = flag.Int("clickhouse.maxThreads", 0, "Max threads per alert query on ClickHouse. 0 means ClickHouse default.")
+	maxIdleConns       = flag.Int("clickhouse.maxIdleConns", 0, "Max idle connections to ClickHouse. 0 means the clickhouse-go default of 5.")
+	maxOpenConns       = flag.Int("clickhouse.maxOpenConns", 0, "Max open connections to ClickHouse. 0 means the clickhouse-go default of maxIdleConns+5.")
 	defaultLimit       = flag.Int("rule.defaultLimit", 10000, "Default max alert instances per rule when group config omits 'limit'. 0 means unlimited.")
 	resendDelay        = flag.Duration("rule.resendDelay", time.Minute, "Minimum interval between re-sending a firing alert to the notifier.")
 	dryRun             = flag.Bool("dryRun", false, "Parse and validate rules without starting evaluation.")
 	httpAddr           = flag.String("httpListenAddr", ":8880", "Address for the HTTP API and UI.")
-	shutdownTimeout = flag.Duration("shutdownTimeout", 30*time.Second, "Maximum time to wait for graceful shutdown.")
+	shutdownTimeout    = flag.Duration("shutdownTimeout", 30*time.Second, "Maximum time to wait for graceful shutdown.")
 	externalLabelsRaw  arrayString
 
 	// version is set by -ldflags at build time.
@@ -146,10 +148,10 @@ func main() {
 
 	// Connect to ClickHouse
 	ch, err := chclient.New(chclient.Config{
-		DSN:           *clickhouseDSN,
-		ReadDSN:       *clickhouseReadDSN,
-		Username:      *clickhouseUser,
-		Password:      password,
+		DSN:      *clickhouseDSN,
+		ReadDSN:  *clickhouseReadDSN,
+		Username: *clickhouseUser,
+		Password: password,
 		TLS: chclient.TLSConfig{
 			Enabled:            *tlsEnabled,
 			CAFile:             *tlsCAFile,
@@ -161,6 +163,8 @@ func main() {
 		MaxQueryTime:  *maxQueryTime,
 		MaxRowsToRead: *maxRowsToRead,
 		MaxThreads:    *maxThreads,
+		MaxOpenConns:  *maxOpenConns,
+		MaxIdleConns:  *maxIdleConns,
 	})
 	if err != nil {
 		fatalf("failed to connect to ClickHouse: %s", err)

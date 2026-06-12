@@ -279,10 +279,10 @@ No manual tagging needed. Just write good commit messages and merge the Release 
 
 ### Helm Chart
 
-The chart is published to `oci://ghcr.io/garbett1/charts/chalert` on each release. Install with:
+The chart is published to `oci://ghcr.io/fluidstackio/charts/chalert` on each release. Install with:
 
 ```sh
-helm install chalert oci://ghcr.io/garbett1/charts/chalert --version <version>
+helm install chalert oci://ghcr.io/fluidstackio/charts/chalert --version <version>
 ```
 
 ## License

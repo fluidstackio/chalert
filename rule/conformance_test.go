@@ -326,7 +326,7 @@ func TestConformance_KeepFiringForDataReturns(t *testing.T) {
 		[][]datasource.Metric{
 			{metric("name", "foo")},
 			{metric("name", "foo")},
-			{}, // empty — keep firing for 1 step
+			{},                      // empty — keep firing for 1 step
 			{metric("name", "foo")}, // data returns
 		},
 		map[int][]expectedAlert{

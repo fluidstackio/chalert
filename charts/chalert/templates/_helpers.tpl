@@ -83,3 +83,24 @@ Build the ClickHouse DSN from auth fields.
   {{- .Values.config.clickhouse.dsn -}}
 {{- end -}}
 {{- end }}
+
+{{/*
+Extension hook for extra pod-template annotations. Default: empty.
+
+Parent charts consuming chalert as a dependency may override this named
+template (parent-chart definitions take precedence over subchart ones) to
+inject computed annotations — most importantly a checksum of rule
+ConfigMaps the parent renders itself and wires in via
+`existingRuleConfigMaps`. The built-in `checksum/rules` annotation only
+covers this chart's own configmap.yaml, so externally-rendered rule
+changes do not roll the Deployment without such an override; chalert
+loads rules once at startup and does not (yet) hot-reload them.
+
+The template is rendered with the subchart's context: parent values are
+NOT visible here except under `.Values.global`, so overrides must read
+any data they need from global values.
+
+Must emit zero or more `key: value` annotation lines.
+*/}}
+{{- define "chalert.extraPodAnnotations" -}}
+{{- end -}}

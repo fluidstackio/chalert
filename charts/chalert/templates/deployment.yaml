@@ -13,6 +13,9 @@ spec:
     metadata:
       annotations:
         checksum/rules: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with (include "chalert.extraPodAnnotations" . | trim) }}
+        {{- . | nindent 8 }}
+        {{- end }}
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}

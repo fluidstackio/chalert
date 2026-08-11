@@ -117,7 +117,11 @@ func main() {
 
 	// Parse rules
 	paths := strings.Split(*rulePaths, ";")
-	groups, err := config.Parse(paths)
+	snap, err := config.ReadSnapshot(paths)
+	if err != nil {
+		fatalf("failed to read rules: %s", err)
+	}
+	groups, err := snap.Parse()
 	if err != nil {
 		fatalf("failed to parse rules: %s", err)
 	}
@@ -249,25 +253,24 @@ func main() {
 		"clickhouse", redactDSN(*clickhouseDSN))
 
 	// Periodic checks skip the reload while this fingerprint is unchanged; SIGHUP and /-/reload force it.
-	lastFP, err := config.Fingerprint(paths)
-	if err != nil {
-		slog.Warn("failed to fingerprint rule files", "error", err)
-	}
+	// Taken from the startup snapshot so it describes exactly the content that was loaded.
+	lastFP := snap.Fingerprint()
 	metrics.ConfigLastReloadSuccessful.Set(1)
 
 	reload := func(trigger string, force bool) {
-		fp, err := config.Fingerprint(paths)
+		snap, err := config.ReadSnapshot(paths)
 		if err != nil {
 			slog.Error("failed to read rule files for reload", "trigger", trigger, "error", err)
 			metrics.ConfigReloads.WithLabelValues("error").Inc()
 			metrics.ConfigLastReloadSuccessful.Set(0)
 			return
 		}
+		fp := snap.Fingerprint()
 		if !force && fp == lastFP {
 			return
 		}
 		slog.Info("reloading rules", "trigger", trigger)
-		newGroups, err := config.Parse(paths)
+		newGroups, err := snap.Parse()
 		if err != nil {
 			slog.Error("failed to reload rules", "trigger", trigger, "error", err)
 			metrics.ConfigReloads.WithLabelValues("error").Inc()

@@ -16,6 +16,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/garbett1/chalert/internal/testutil"
 )
 
 // These tests exercise hot reloading against the real chalert binary: rules
@@ -50,41 +52,6 @@ func chalertBinary(t *testing.T) string {
 	return buildPath
 }
 
-// writeConfigMapVolume emulates the kubelet AtomicWriter layout: files live in
-// a timestamped payload directory, ..data is a symlink to it, and each key is
-// a top-level symlink through ..data. Calling it again performs the same
-// atomic ..data swap the kubelet does on ConfigMap updates.
-func writeConfigMapVolume(t *testing.T, dir string, files map[string]string) {
-	t.Helper()
-	payloadName := fmt.Sprintf("..%d", time.Now().UnixNano())
-	payload := filepath.Join(dir, payloadName)
-	if err := os.Mkdir(payload, 0755); err != nil {
-		t.Fatal(err)
-	}
-	for name, content := range files {
-		if err := os.WriteFile(filepath.Join(payload, name), []byte(content), 0644); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	tmpLink := filepath.Join(dir, "..data_tmp")
-	if err := os.Symlink(payloadName, tmpLink); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Rename(tmpLink, filepath.Join(dir, "..data")); err != nil {
-		t.Fatal(err)
-	}
-
-	for name := range files {
-		link := filepath.Join(dir, name)
-		if _, err := os.Lstat(link); os.IsNotExist(err) {
-			if err := os.Symlink(filepath.Join("..data", name), link); err != nil {
-				t.Fatal(err)
-			}
-		}
-	}
-}
-
 func freePort(t *testing.T) int {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
@@ -92,7 +59,7 @@ func freePort(t *testing.T) int {
 		t.Fatal(err)
 	}
 	port := l.Addr().(*net.TCPAddr).Port
-	l.Close()
+	_ = l.Close()
 	return port
 }
 
@@ -167,24 +134,29 @@ func startChalert(t *testing.T, extraArgs ...string) *chalertProc {
 		if err != nil {
 			return false
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		return resp.StatusCode == http.StatusOK
 	})
 	return p
 }
 
 // metricValue scrapes /metrics and returns the value of the first sample
-// whose name+labels prefix matches, or 0 if absent.
+// whose name+labels prefix matches. An absent series is a genuine 0 (counter
+// series only exist once incremented); a failed scrape fails the test so
+// assertions on 0 can't pass vacuously.
 func (p *chalertProc) metricValue(t *testing.T, prefix string) float64 {
 	t.Helper()
 	resp, err := http.Get(p.baseURL + "/metrics")
 	if err != nil {
-		return 0
+		t.Fatalf("scrape /metrics: %s", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("scrape /metrics: status %d", resp.StatusCode)
+	}
 	var body bytes.Buffer
 	if _, err := body.ReadFrom(resp.Body); err != nil {
-		return 0
+		t.Fatalf("scrape /metrics: read body: %s", err)
 	}
 	for _, line := range strings.Split(body.String(), "\n") {
 		if !strings.HasPrefix(line, prefix) {
@@ -261,7 +233,7 @@ func TestHotReloadConfigMapSwap(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	writeConfigMapVolume(t, dir, map[string]string{
+	testutil.WriteConfigMapVolume(t, dir, map[string]string{
 		"rules.yaml": rulesFile(alertingRule("HotReloadA", countingRule(10))),
 	})
 
@@ -283,7 +255,7 @@ func TestHotReloadConfigMapSwap(t *testing.T) {
 	}
 
 	t.Log("phase 3: ConfigMap swap adds a rule, picked up without restart")
-	writeConfigMapVolume(t, dir, map[string]string{
+	testutil.WriteConfigMapVolume(t, dir, map[string]string{
 		"rules.yaml": rulesFile(
 			alertingRule("HotReloadA", countingRule(10)),
 			alertingRule("HotReloadB", ruleAlwaysB),
@@ -312,7 +284,7 @@ func TestHotReloadConfigMapSwap(t *testing.T) {
 
 	t.Log("phase 5: broken config is rejected, old rules keep evaluating")
 	errorsBefore := p.reloadCount(t, "error")
-	writeConfigMapVolume(t, dir, map[string]string{
+	testutil.WriteConfigMapVolume(t, dir, map[string]string{
 		"rules.yaml": "groups: [ this is not valid yaml",
 	})
 	waitFor(t, 30*time.Second, 200*time.Millisecond, "reload error counted", func() bool {
@@ -327,7 +299,7 @@ func TestHotReloadConfigMapSwap(t *testing.T) {
 	})
 
 	t.Log("phase 6: fixed config raises HotReloadA threshold, alert resolves in place")
-	writeConfigMapVolume(t, dir, map[string]string{
+	testutil.WriteConfigMapVolume(t, dir, map[string]string{
 		"rules.yaml": rulesFile(
 			alertingRule("HotReloadA", countingRule(1000000)),
 			alertingRule("HotReloadB", ruleAlwaysB),
@@ -380,7 +352,7 @@ func TestHotReloadHTTPEndpointAndSIGHUP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusAccepted {
 		t.Fatalf("expected 202 from /-/reload, got %d", resp.StatusCode)
 	}

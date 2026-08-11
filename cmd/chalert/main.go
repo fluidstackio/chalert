@@ -248,9 +248,7 @@ func main() {
 		"configCheckInterval", configCheckInterval.String(),
 		"clickhouse", redactDSN(*clickhouseDSN))
 
-	// Fingerprint of the rule files backing the currently loaded config.
-	// Periodic checks skip the reload when it is unchanged; SIGHUP and
-	// /-/reload force a reload regardless.
+	// Periodic checks skip the reload while this fingerprint is unchanged; SIGHUP and /-/reload force it.
 	lastFP, err := config.Fingerprint(paths)
 	if err != nil {
 		slog.Warn("failed to fingerprint rule files", "error", err)
@@ -290,8 +288,7 @@ func main() {
 		slog.Info("rules reloaded", "trigger", trigger, "groups", len(ruleGroups))
 	}
 
-	// Reload requests from the HTTP endpoint. Buffered so a request during
-	// an in-flight reload coalesces into one follow-up instead of blocking.
+	// Buffered so requests during an in-flight reload coalesce instead of blocking.
 	reloadRequests := make(chan struct{}, 1)
 	httpSrv.SetReloadFunc(func() {
 		select {

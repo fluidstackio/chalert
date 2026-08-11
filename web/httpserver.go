@@ -43,9 +43,7 @@ func (s *Server) SetReady(ready bool) {
 	s.ready.Store(ready)
 }
 
-// SetReloadFunc registers the function invoked by POST /-/reload.
-// Until it is set, the endpoint responds 503. The function must be
-// non-blocking: it schedules a reload rather than performing it.
+// SetReloadFunc registers the non-blocking reload trigger for POST /-/reload (503 until set).
 func (s *Server) SetReloadFunc(fn func()) {
 	s.reloadFn.Store(&fn)
 }

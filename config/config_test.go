@@ -461,3 +461,180 @@ groups:
 		t.Errorf("unexpected group names: %q, %q", groups[0].Name, groups[1].Name)
 	}
 }
+
+func TestFingerprint(t *testing.T) {
+	write := func(t *testing.T, dir, name, content string) string {
+		t.Helper()
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+
+	t.Run("stable for unchanged content", func(t *testing.T) {
+		dir := t.TempDir()
+		write(t, dir, "a.yaml", "groups: []")
+		write(t, dir, "b.yaml", "groups: []")
+
+		fp1, err := Fingerprint([]string{filepath.Join(dir, "*")})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		fp2, err := Fingerprint([]string{filepath.Join(dir, "*")})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if fp1 != fp2 {
+			t.Errorf("fingerprint changed without content change: %d != %d", fp1, fp2)
+		}
+	})
+
+	t.Run("changes when content changes", func(t *testing.T) {
+		dir := t.TempDir()
+		write(t, dir, "a.yaml", "groups: []")
+
+		fp1, err := Fingerprint([]string{filepath.Join(dir, "*")})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		write(t, dir, "a.yaml", "groups: [{name: g, rules: []}]")
+		fp2, err := Fingerprint([]string{filepath.Join(dir, "*")})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if fp1 == fp2 {
+			t.Error("fingerprint did not change with content change")
+		}
+	})
+
+	t.Run("changes when a file is added or removed", func(t *testing.T) {
+		dir := t.TempDir()
+		write(t, dir, "a.yaml", "groups: []")
+
+		fp1, err := Fingerprint([]string{filepath.Join(dir, "*")})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		added := write(t, dir, "b.yaml", "groups: []")
+		fp2, err := Fingerprint([]string{filepath.Join(dir, "*")})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if fp1 == fp2 {
+			t.Error("fingerprint did not change when a file was added")
+		}
+		if err := os.Remove(added); err != nil {
+			t.Fatal(err)
+		}
+		fp3, err := Fingerprint([]string{filepath.Join(dir, "*")})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if fp3 != fp1 {
+			t.Errorf("fingerprint after removal should match original: %d != %d", fp3, fp1)
+		}
+	})
+
+	t.Run("errors when no files match", func(t *testing.T) {
+		dir := t.TempDir()
+		if _, err := Fingerprint([]string{filepath.Join(dir, "*")}); err == nil {
+			t.Error("expected error for empty glob")
+		}
+	})
+
+	t.Run("multiple patterns are order independent in content", func(t *testing.T) {
+		dir := t.TempDir()
+		a := write(t, dir, "a.yaml", "groups: []")
+		b := write(t, dir, "b.yaml", "groups: []")
+
+		fp1, err := Fingerprint([]string{a, b})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		fp2, err := Fingerprint([]string{b, a})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if fp1 != fp2 {
+			t.Errorf("fingerprint depends on pattern order: %d != %d", fp1, fp2)
+		}
+	})
+}
+
+// writeConfigMapDir lays files out the way the kubelet's AtomicWriter does for
+// a ConfigMap volume: a timestamped payload directory, a ..data symlink to it,
+// and one top-level symlink per key pointing through ..data.
+func writeConfigMapDir(t *testing.T, dir, payloadDir string, files map[string]string) {
+	t.Helper()
+	payload := filepath.Join(dir, payloadDir)
+	if err := os.Mkdir(payload, 0755); err != nil {
+		t.Fatal(err)
+	}
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(payload, name), []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	dataLink := filepath.Join(dir, "..data")
+	tmpLink := filepath.Join(dir, "..data_tmp")
+	if err := os.Symlink(payloadDir, tmpLink); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(tmpLink, dataLink); err != nil {
+		t.Fatal(err)
+	}
+
+	for name := range files {
+		link := filepath.Join(dir, name)
+		if _, err := os.Lstat(link); os.IsNotExist(err) {
+			if err := os.Symlink(filepath.Join("..data", name), link); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+}
+
+func TestFingerprintConfigMapSymlinkSwap(t *testing.T) {
+	dir := t.TempDir()
+	rules := "groups: [{name: g, rules: [{alert: A, expr: SELECT 1 AS value}]}]"
+	writeConfigMapDir(t, dir, "..2026_08_11_00_00_00.001", map[string]string{"rules.yaml": rules})
+
+	pattern := []string{filepath.Join(dir, "*")}
+	fp1, err := Fingerprint(pattern)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Rotating the payload directory without changing content must not
+	// change the fingerprint — kubelet does this on every volume sync.
+	writeConfigMapDir(t, dir, "..2026_08_11_00_01_00.002", map[string]string{"rules.yaml": rules})
+	fp2, err := Fingerprint(pattern)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if fp1 != fp2 {
+		t.Errorf("payload dir rotation with identical content changed fingerprint: %d != %d", fp1, fp2)
+	}
+
+	// A content change through the same swap mechanism must change it.
+	changed := "groups: [{name: g, rules: [{alert: B, expr: SELECT 2 AS value}]}]"
+	writeConfigMapDir(t, dir, "..2026_08_11_00_02_00.003", map[string]string{"rules.yaml": changed})
+	fp3, err := Fingerprint(pattern)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if fp3 == fp1 {
+		t.Error("content change via ..data swap did not change fingerprint")
+	}
+
+	// Parse must also read the swapped content correctly.
+	groups, err := Parse(pattern)
+	if err != nil {
+		t.Fatalf("parse after swap: %v", err)
+	}
+	if len(groups) != 1 || len(groups[0].Rules) != 1 || groups[0].Rules[0].Alert != "B" {
+		t.Errorf("parse did not see swapped content: %+v", groups)
+	}
+}

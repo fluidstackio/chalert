@@ -306,6 +306,35 @@ func parse(files map[string][]byte) ([]Group, error) {
 	return groups, nil
 }
 
+// Fingerprint computes a hash of the raw content of all files matching the
+// given path patterns. It reads files exactly like Parse (globs, symlinks
+// followed, directories skipped) so it can be used as a cheap pre-check to
+// decide whether a reload is needed without parsing or querying ClickHouse.
+//
+// The hash covers file paths and raw bytes, so Kubernetes ConfigMap volume
+// updates (an atomic ..data symlink swap that keeps the top-level file paths
+// stable) only change the fingerprint when actual content changes.
+func Fingerprint(pathPatterns []string) (uint64, error) {
+	files, err := readFiles(pathPatterns)
+	if err != nil {
+		return 0, err
+	}
+	paths := make([]string, 0, len(files))
+	for path := range files {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+
+	h := fnv.New64a()
+	for _, path := range paths {
+		h.Write([]byte(path))
+		h.Write([]byte{0})
+		h.Write(files[path])
+		h.Write([]byte{0})
+	}
+	return h.Sum64(), nil
+}
+
 func readFiles(patterns []string) (map[string][]byte, error) {
 	files := make(map[string][]byte)
 	for _, pattern := range patterns {

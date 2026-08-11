@@ -60,27 +60,28 @@ func (a *arrayString) Set(v string) error {
 }
 
 var (
-	rulePaths          = flag.String("rule", "", "Path to rule files (supports globs). Multiple paths separated by ';'.")
-	evaluationInterval = flag.Duration("evaluationInterval", time.Minute, "Default evaluation interval for rule groups.")
-	clickhouseDSN      = flag.String("clickhouse.dsn", "", "ClickHouse connection DSN (required).")
-	clickhouseReadDSN  = flag.String("clickhouse.read-dsn", "", "Optional ClickHouse read replica DSN for query evaluation.")
-	clickhouseDB       = flag.String("clickhouse.database", "default", "ClickHouse database for alert state tables.")
-	clickhouseUser     = flag.String("clickhouse.username", "", "ClickHouse username. Overrides any user in the DSN.")
-	clickhousePass     = flag.String("clickhouse.password", "", "ClickHouse password. Overrides any password in the DSN.")
-	clickhousePassFile = flag.String("clickhouse.passwordFile", "", "Path to file containing the ClickHouse password (e.g. a mounted k8s secret). Overrides -clickhouse.password.")
-	maxQueryTime       = flag.Duration("clickhouse.maxQueryTime", 30*time.Second, "Max execution time per alert query.")
-	notifierURLs       = flag.String("notifier.url", "", "Alertmanager URL(s), comma-separated for HA.")
-	externalURL        = flag.String("external.url", "", "External URL for alert source links.")
-	maxRowsToRead      = flag.Int64("clickhouse.maxRowsToRead", 0, "Max rows ClickHouse may read per alert query. 0 means unlimited.")
-	maxThreads         = flag.Int("clickhouse.maxThreads", 0, "Max threads per alert query on ClickHouse. 0 means ClickHouse default.")
-	maxIdleConns       = flag.Int("clickhouse.maxIdleConns", 0, "Max idle connections to ClickHouse. 0 means the clickhouse-go default of 5.")
-	maxOpenConns       = flag.Int("clickhouse.maxOpenConns", 0, "Max open connections to ClickHouse. 0 means the clickhouse-go default of maxIdleConns+5.")
-	defaultLimit       = flag.Int("rule.defaultLimit", 10000, "Default max alert instances per rule when group config omits 'limit'. 0 means unlimited.")
-	resendDelay        = flag.Duration("rule.resendDelay", time.Minute, "Minimum interval between re-sending a firing alert to the notifier.")
-	dryRun             = flag.Bool("dryRun", false, "Parse and validate rules without starting evaluation.")
-	httpAddr           = flag.String("httpListenAddr", ":8880", "Address for the HTTP API and UI.")
-	shutdownTimeout    = flag.Duration("shutdownTimeout", 30*time.Second, "Maximum time to wait for graceful shutdown.")
-	externalLabelsRaw  arrayString
+	rulePaths           = flag.String("rule", "", "Path to rule files (supports globs). Multiple paths separated by ';'.")
+	evaluationInterval  = flag.Duration("evaluationInterval", time.Minute, "Default evaluation interval for rule groups.")
+	clickhouseDSN       = flag.String("clickhouse.dsn", "", "ClickHouse connection DSN (required).")
+	clickhouseReadDSN   = flag.String("clickhouse.read-dsn", "", "Optional ClickHouse read replica DSN for query evaluation.")
+	clickhouseDB        = flag.String("clickhouse.database", "default", "ClickHouse database for alert state tables.")
+	clickhouseUser      = flag.String("clickhouse.username", "", "ClickHouse username. Overrides any user in the DSN.")
+	clickhousePass      = flag.String("clickhouse.password", "", "ClickHouse password. Overrides any password in the DSN.")
+	clickhousePassFile  = flag.String("clickhouse.passwordFile", "", "Path to file containing the ClickHouse password (e.g. a mounted k8s secret). Overrides -clickhouse.password.")
+	maxQueryTime        = flag.Duration("clickhouse.maxQueryTime", 30*time.Second, "Max execution time per alert query.")
+	notifierURLs        = flag.String("notifier.url", "", "Alertmanager URL(s), comma-separated for HA.")
+	externalURL         = flag.String("external.url", "", "External URL for alert source links.")
+	maxRowsToRead       = flag.Int64("clickhouse.maxRowsToRead", 0, "Max rows ClickHouse may read per alert query. 0 means unlimited.")
+	maxThreads          = flag.Int("clickhouse.maxThreads", 0, "Max threads per alert query on ClickHouse. 0 means ClickHouse default.")
+	maxIdleConns        = flag.Int("clickhouse.maxIdleConns", 0, "Max idle connections to ClickHouse. 0 means the clickhouse-go default of 5.")
+	maxOpenConns        = flag.Int("clickhouse.maxOpenConns", 0, "Max open connections to ClickHouse. 0 means the clickhouse-go default of maxIdleConns+5.")
+	defaultLimit        = flag.Int("rule.defaultLimit", 10000, "Default max alert instances per rule when group config omits 'limit'. 0 means unlimited.")
+	resendDelay         = flag.Duration("rule.resendDelay", time.Minute, "Minimum interval between re-sending a firing alert to the notifier.")
+	configCheckInterval = flag.Duration("rule.configCheckInterval", 0, "Interval for re-reading rule files and hot-reloading on content changes (e.g. updated ConfigMap mounts). 0 disables periodic checks; SIGHUP and POST /-/reload always work.")
+	dryRun              = flag.Bool("dryRun", false, "Parse and validate rules without starting evaluation.")
+	httpAddr            = flag.String("httpListenAddr", ":8880", "Address for the HTTP API and UI.")
+	shutdownTimeout     = flag.Duration("shutdownTimeout", 30*time.Second, "Maximum time to wait for graceful shutdown.")
+	externalLabelsRaw   arrayString
 
 	// version is set by -ldflags at build time.
 	version = "dev"
@@ -244,62 +245,116 @@ func main() {
 		"version", version,
 		"groups", len(ruleGroups),
 		"http", *httpAddr,
+		"configCheckInterval", configCheckInterval.String(),
 		"clickhouse", redactDSN(*clickhouseDSN))
+
+	// Fingerprint of the rule files backing the currently loaded config.
+	// Periodic checks skip the reload when it is unchanged; SIGHUP and
+	// /-/reload force a reload regardless.
+	lastFP, err := config.Fingerprint(paths)
+	if err != nil {
+		slog.Warn("failed to fingerprint rule files", "error", err)
+	}
+	metrics.ConfigLastReloadSuccessful.Set(1)
+
+	reload := func(trigger string, force bool) {
+		fp, err := config.Fingerprint(paths)
+		if err != nil {
+			slog.Error("failed to read rule files for reload", "trigger", trigger, "error", err)
+			metrics.ConfigReloads.WithLabelValues("error").Inc()
+			metrics.ConfigLastReloadSuccessful.Set(0)
+			return
+		}
+		if !force && fp == lastFP {
+			return
+		}
+		slog.Info("reloading rules", "trigger", trigger)
+		newGroups, err := config.Parse(paths)
+		if err != nil {
+			slog.Error("failed to reload rules", "trigger", trigger, "error", err)
+			metrics.ConfigReloads.WithLabelValues("error").Inc()
+			metrics.ConfigLastReloadSuccessful.Set(0)
+			return
+		}
+		if err := config.NormalizeRuleIDs(newGroups, queryHash); err != nil {
+			slog.Error("failed to normalize rule IDs on reload", "trigger", trigger, "error", err)
+			metrics.ConfigReloads.WithLabelValues("error").Inc()
+			metrics.ConfigLastReloadSuccessful.Set(0)
+			return
+		}
+		reloadGroups(ctx, ruleGroups, newGroups, qb, notify, store, &wg, groupOpts)
+		lastFP = fp
+		metrics.ConfigReloads.WithLabelValues("success").Inc()
+		metrics.ConfigLastReloadSuccess.SetToCurrentTime()
+		metrics.ConfigLastReloadSuccessful.Set(1)
+		slog.Info("rules reloaded", "trigger", trigger, "groups", len(ruleGroups))
+	}
+
+	// Reload requests from the HTTP endpoint. Buffered so a request during
+	// an in-flight reload coalesces into one follow-up instead of blocking.
+	reloadRequests := make(chan struct{}, 1)
+	httpSrv.SetReloadFunc(func() {
+		select {
+		case reloadRequests <- struct{}{}:
+		default:
+		}
+	})
+
+	var configCheckCh <-chan time.Time
+	if *configCheckInterval > 0 {
+		ticker := time.NewTicker(*configCheckInterval)
+		defer ticker.Stop()
+		configCheckCh = ticker.C
+	}
 
 	// Handle signals
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 
-	for sig := range sigCh {
-		switch sig {
-		case syscall.SIGHUP:
-			slog.Info("SIGHUP received, reloading rules...")
-			newGroups, err := config.Parse(paths)
-			if err != nil {
-				slog.Error("failed to reload rules", "error", err)
-				metrics.ConfigReloads.WithLabelValues("error").Inc()
-				continue
+	for {
+		select {
+		case <-configCheckCh:
+			reload("interval", false)
+
+		case <-reloadRequests:
+			reload("http", true)
+
+		case sig := <-sigCh:
+			switch sig {
+			case syscall.SIGHUP:
+				reload("sighup", true)
+
+			case syscall.SIGINT, syscall.SIGTERM:
+				slog.Info("shutdown signal received", "signal", sig)
+				httpSrv.SetReady(false)
+				cancel()
+				for _, g := range ruleGroups {
+					g.Close()
+				}
+
+				// Wait for groups with a timeout to prevent hanging during rolling restarts.
+				done := make(chan struct{})
+				go func() {
+					wg.Wait()
+					close(done)
+				}()
+				select {
+				case <-done:
+				case <-time.After(*shutdownTimeout):
+					slog.Error("shutdown timeout exceeded, some goroutines did not exit")
+				}
+
+				// Final state persistence
+				persistAllState(context.Background(), ruleGroups, store)
+
+				// Shut down HTTP server
+				shutCtx, shutCancel := context.WithTimeout(context.Background(), 5*time.Second)
+				_ = httpSrv.Shutdown(shutCtx)
+				shutCancel()
+
+				slog.Info("chalert stopped")
+				return
 			}
-			if err := config.NormalizeRuleIDs(newGroups, queryHash); err != nil {
-				slog.Error("failed to normalize rule IDs on reload", "error", err)
-				metrics.ConfigReloads.WithLabelValues("error").Inc()
-				continue
-			}
-			reloadGroups(ctx, ruleGroups, newGroups, qb, notify, store, &wg, groupOpts)
-			metrics.ConfigReloads.WithLabelValues("success").Inc()
-			metrics.ConfigLastReloadSuccess.SetToCurrentTime()
-			slog.Info("rules reloaded", "groups", len(ruleGroups))
-
-		case syscall.SIGINT, syscall.SIGTERM:
-			slog.Info("shutdown signal received", "signal", sig)
-			httpSrv.SetReady(false)
-			cancel()
-			for _, g := range ruleGroups {
-				g.Close()
-			}
-
-			// Wait for groups with a timeout to prevent hanging during rolling restarts.
-			done := make(chan struct{})
-			go func() {
-				wg.Wait()
-				close(done)
-			}()
-			select {
-			case <-done:
-			case <-time.After(*shutdownTimeout):
-				slog.Error("shutdown timeout exceeded, some goroutines did not exit")
-			}
-
-			// Final state persistence
-			persistAllState(context.Background(), ruleGroups, store)
-
-			// Shut down HTTP server
-			shutCtx, shutCancel := context.WithTimeout(context.Background(), 5*time.Second)
-			_ = httpSrv.Shutdown(shutCtx)
-			shutCancel()
-
-			slog.Info("chalert stopped")
-			return
 		}
 	}
 }

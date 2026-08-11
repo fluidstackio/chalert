@@ -13,8 +13,9 @@ import (
 
 // Server is the chalert HTTP server for health, readiness, metrics, and version info.
 type Server struct {
-	srv   *http.Server
-	ready atomic.Bool
+	srv      *http.Server
+	ready    atomic.Bool
+	reloadFn atomic.Pointer[func()]
 }
 
 // New creates a new HTTP server on the given address.
@@ -23,6 +24,7 @@ func New(addr, version string) *Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.handleHealth)
 	mux.HandleFunc("GET /ready", s.handleReady)
+	mux.HandleFunc("POST /-/reload", s.handleReload)
 	mux.Handle("GET /metrics", promhttp.Handler())
 	mux.HandleFunc("GET /version", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -39,6 +41,26 @@ func New(addr, version string) *Server {
 // SetReady marks the server as ready to receive traffic.
 func (s *Server) SetReady(ready bool) {
 	s.ready.Store(ready)
+}
+
+// SetReloadFunc registers the function invoked by POST /-/reload.
+// Until it is set, the endpoint responds 503. The function must be
+// non-blocking: it schedules a reload rather than performing it.
+func (s *Server) SetReloadFunc(fn func()) {
+	s.reloadFn.Store(&fn)
+}
+
+func (s *Server) handleReload(w http.ResponseWriter, _ *http.Request) {
+	fn := s.reloadFn.Load()
+	if fn == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte("reload not available"))
+		return
+	}
+	(*fn)()
+	slog.Info("reload requested via /-/reload")
+	w.WriteHeader(http.StatusAccepted)
+	_, _ = w.Write([]byte("reload scheduled"))
 }
 
 // ListenAndServe starts the HTTP server. Blocks until the server stops.

@@ -20,7 +20,7 @@ jobs:
       - name: Vet
         run: go vet ./...
       - name: Test
-        run: go test ./config/ ./rule/ ./notifier/ ./web/ ./metrics/ -v -race -count=1
+        run: go test ./config/ ./rule/ ./notifier/ ./web/ ./metrics/ ./cmd/... -v -race -count=1
       - name: Build
         run: CGO_ENABLED=0 go build ./cmd/chalert
 

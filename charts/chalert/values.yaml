@@ -60,6 +60,10 @@ config:
   externalURL: ""
   # -- Default evaluation interval
   evaluationInterval: "1m"
+  # -- Interval for re-reading rule files and hot-reloading on content
+  # changes, so ConfigMap updates apply without a pod restart.
+  # Set to "0" to disable periodic checks (SIGHUP and POST /-/reload still work).
+  ruleConfigCheckInterval: "1m"
   # -- Default max alert instances per rule
   defaultLimit: 10000
   # -- External labels applied to all alerts

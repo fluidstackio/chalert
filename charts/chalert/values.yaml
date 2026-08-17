@@ -60,6 +60,8 @@ config:
   externalURL: ""
   # -- Default evaluation interval
   evaluationInterval: "1m"
+  # -- Interval for re-reading rule files and hot-reloading on changes ("0" disables)
+  ruleConfigCheckInterval: "1m"
   # -- Default max alert instances per rule
   defaultLimit: 10000
   # -- External labels applied to all alerts

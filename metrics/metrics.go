@@ -60,6 +60,13 @@ var (
 		Name:      "config_last_reload_success_timestamp_seconds",
 		Help:      "Timestamp of the last successful config reload.",
 	})
+
+	// ConfigLastReloadSuccessful reports whether the last config reload attempt succeeded (1) or failed (0).
+	ConfigLastReloadSuccessful = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "chalert",
+		Name:      "config_last_reload_successful",
+		Help:      "Whether the last config reload attempt succeeded (1) or failed (0).",
+	})
 )
 
 func init() {
@@ -72,5 +79,6 @@ func init() {
 		NotifierErrors,
 		ConfigReloads,
 		ConfigLastReloadSuccess,
+		ConfigLastReloadSuccessful,
 	)
 }

@@ -253,11 +253,11 @@ func (g *Group) Validate() error {
 
 // Parse reads rule configuration from the given file paths (supports globs).
 func Parse(pathPatterns []string) ([]Group, error) {
-	files, err := readFiles(pathPatterns)
+	snap, err := ReadSnapshot(pathPatterns)
 	if err != nil {
 		return nil, err
 	}
-	return parse(files)
+	return snap.Parse()
 }
 
 func parse(files map[string][]byte) ([]Group, error) {
@@ -304,6 +304,44 @@ func parse(files map[string][]byte) ([]Group, error) {
 		}
 	}
 	return groups, nil
+}
+
+// Snapshot is a point-in-time read of rule files, so fingerprinting and
+// parsing operate on the same content.
+type Snapshot struct {
+	files map[string][]byte
+}
+
+// ReadSnapshot reads all rule files matching the given path patterns (supports globs).
+func ReadSnapshot(pathPatterns []string) (*Snapshot, error) {
+	files, err := readFiles(pathPatterns)
+	if err != nil {
+		return nil, err
+	}
+	return &Snapshot{files: files}, nil
+}
+
+// Fingerprint hashes the snapshot's raw content, as a cheap reload pre-check.
+func (s *Snapshot) Fingerprint() uint64 {
+	paths := make([]string, 0, len(s.files))
+	for path := range s.files {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+
+	h := fnv.New64a()
+	for _, path := range paths {
+		h.Write([]byte(path))
+		h.Write([]byte{0})
+		h.Write(s.files[path])
+		h.Write([]byte{0})
+	}
+	return h.Sum64()
+}
+
+// Parse parses the snapshot's files into rule groups.
+func (s *Snapshot) Parse() ([]Group, error) {
+	return parse(s.files)
 }
 
 func readFiles(patterns []string) (map[string][]byte, error) {

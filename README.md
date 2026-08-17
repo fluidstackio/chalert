@@ -144,7 +144,13 @@ Alert state is stored in two ClickHouse tables (auto-created on startup):
 
 ### Hot Reload
 
-Send `SIGHUP` to reload rule files without restarting. Existing alert state is preserved for rules whose identity hasn't changed. New rules start fresh; removed rules are stopped gracefully.
+Rule files are hot-reloaded without restarting. Existing alert state is preserved for rules whose identity hasn't changed. New rules start fresh; removed rules are stopped gracefully. Reload failures (unreadable or invalid files) keep the previous rules running and are surfaced via `chalert_config_reloads_total{result="error"}` and `chalert_config_last_reload_successful`.
+
+Three triggers:
+
+- **Periodic check** — with `-rule.configCheckInterval` set, chalert re-reads the rule files on that interval and reloads only when their content changed. This is how Kubernetes ConfigMap updates apply automatically: the kubelet syncs the mounted volume, and the next check picks it up. Cheap when nothing changed — a content fingerprint is compared before any parsing or ClickHouse round-trips happen.
+- **`POST /-/reload`** — schedules an immediate reload.
+- **`SIGHUP`** — same as before.
 
 ### ClickHouse Guard Rails
 
@@ -170,6 +176,7 @@ A separate read connection can be configured with `-clickhouse.read-dsn` to isol
 | `-notifier.url` | | Alertmanager URL(s), comma-separated |
 | `-evaluationInterval` | `1m` | Default group evaluation interval |
 | `-rule.defaultLimit` | `10000` | Default max alert instances per rule |
+| `-rule.configCheckInterval` | `0` | Interval for re-reading rule files and hot-reloading on changes (0 = disabled) |
 | `-external.url` | | Base URL for alert source links |
 | `-external.label` | | External labels (`Name=value`, repeatable) |
 | `-httpListenAddr` | `:8880` | HTTP API address |
@@ -196,6 +203,7 @@ chalert exposes Prometheus metrics on the HTTP server (`-httpListenAddr`, defaul
 | `/ready` | Readiness probe (200 after all groups are running) |
 | `/metrics` | Prometheus metrics |
 | `/version` | Build version JSON |
+| `/-/reload` | POST triggers a rule reload |
 
 Key metrics:
 
@@ -206,6 +214,7 @@ Key metrics:
 | `chalert_alerts_active` | gauge | Active alert instances per rule/state |
 | `chalert_notifier_sends_total` | counter | Notification send attempts by URL/result |
 | `chalert_config_reloads_total` | counter | Config reload attempts by result |
+| `chalert_config_last_reload_successful` | gauge | Whether the last reload attempt succeeded (1) or failed (0) |
 
 ## Development
 

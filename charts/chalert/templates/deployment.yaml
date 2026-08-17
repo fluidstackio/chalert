@@ -67,6 +67,9 @@ spec:
             {{- end }}
             - -evaluationInterval={{ .Values.config.evaluationInterval }}
             - -rule.defaultLimit={{ .Values.config.defaultLimit }}
+            {{- if .Values.config.ruleConfigCheckInterval }}
+            - -rule.configCheckInterval={{ .Values.config.ruleConfigCheckInterval }}
+            {{- end }}
             - -httpListenAddr=:8880
             {{- $rulePaths := list -}}
             {{- if .Values.rules -}}

@@ -245,13 +245,12 @@ func TestTwoServiceRecoveryScenario(t *testing.T) {
 		return firingA && firingB
 	})
 
-	// Verify labels on the fired alerts.
+	// Verify labels on the fired alerts. The Alertmanager container is
+	// shared across tests, so only inspect this test's own alerts —
+	// other tests' alerts can still be repeating in it.
 	for _, a := range webhook.getAlerts() {
-		if a.Status != "firing" {
+		if a.Status != "firing" || a.Labels["alertname"] != "HighErrorRate" {
 			continue
-		}
-		if a.Labels["alertname"] != "HighErrorRate" {
-			t.Errorf("expected alertname=HighErrorRate, got %q", a.Labels["alertname"])
 		}
 		if a.Labels["severity"] != "critical" {
 			t.Errorf("expected severity=critical, got %q", a.Labels["severity"])

@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/garbett1/chalert/internal/testutil"
 )
 
 func TestParseValidConfig(t *testing.T) {
@@ -459,5 +461,145 @@ groups:
 	}
 	if groups[0].Name != "group-a" || groups[1].Name != "group-b" {
 		t.Errorf("unexpected group names: %q, %q", groups[0].Name, groups[1].Name)
+	}
+}
+
+func fingerprint(t *testing.T, patterns []string) uint64 {
+	t.Helper()
+	snap, err := ReadSnapshot(patterns)
+	if err != nil {
+		t.Fatalf("read snapshot: %v", err)
+	}
+	return snap.Fingerprint()
+}
+
+func TestFingerprint(t *testing.T) {
+	write := func(t *testing.T, dir, name, content string) string {
+		t.Helper()
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+
+	t.Run("stable for unchanged content", func(t *testing.T) {
+		dir := t.TempDir()
+		write(t, dir, "a.yaml", "groups: []")
+		write(t, dir, "b.yaml", "groups: []")
+
+		fp1 := fingerprint(t, []string{filepath.Join(dir, "*")})
+		fp2 := fingerprint(t, []string{filepath.Join(dir, "*")})
+		if fp1 != fp2 {
+			t.Errorf("fingerprint changed without content change: %d != %d", fp1, fp2)
+		}
+	})
+
+	t.Run("changes when content changes", func(t *testing.T) {
+		dir := t.TempDir()
+		write(t, dir, "a.yaml", "groups: []")
+
+		fp1 := fingerprint(t, []string{filepath.Join(dir, "*")})
+		write(t, dir, "a.yaml", "groups: [{name: g, rules: []}]")
+		fp2 := fingerprint(t, []string{filepath.Join(dir, "*")})
+		if fp1 == fp2 {
+			t.Error("fingerprint did not change with content change")
+		}
+	})
+
+	t.Run("changes when a file is added or removed", func(t *testing.T) {
+		dir := t.TempDir()
+		write(t, dir, "a.yaml", "groups: []")
+
+		fp1 := fingerprint(t, []string{filepath.Join(dir, "*")})
+		added := write(t, dir, "b.yaml", "groups: []")
+		fp2 := fingerprint(t, []string{filepath.Join(dir, "*")})
+		if fp1 == fp2 {
+			t.Error("fingerprint did not change when a file was added")
+		}
+		if err := os.Remove(added); err != nil {
+			t.Fatal(err)
+		}
+		fp3 := fingerprint(t, []string{filepath.Join(dir, "*")})
+		if fp3 != fp1 {
+			t.Errorf("fingerprint after removal should match original: %d != %d", fp3, fp1)
+		}
+	})
+
+	t.Run("errors when no files match", func(t *testing.T) {
+		dir := t.TempDir()
+		if _, err := ReadSnapshot([]string{filepath.Join(dir, "*")}); err == nil {
+			t.Error("expected error for empty glob")
+		}
+	})
+
+	t.Run("multiple patterns are order independent in content", func(t *testing.T) {
+		dir := t.TempDir()
+		a := write(t, dir, "a.yaml", "groups: []")
+		b := write(t, dir, "b.yaml", "groups: []")
+
+		fp1 := fingerprint(t, []string{a, b})
+		fp2 := fingerprint(t, []string{b, a})
+		if fp1 != fp2 {
+			t.Errorf("fingerprint depends on pattern order: %d != %d", fp1, fp2)
+		}
+	})
+
+	t.Run("snapshot is immune to later file changes", func(t *testing.T) {
+		dir := t.TempDir()
+		write(t, dir, "a.yaml", "groups: [{name: g, rules: [{alert: A, expr: SELECT 1 AS value}]}]")
+
+		snap, err := ReadSnapshot([]string{filepath.Join(dir, "*")})
+		if err != nil {
+			t.Fatalf("read snapshot: %v", err)
+		}
+		fpBefore := snap.Fingerprint()
+
+		write(t, dir, "a.yaml", "groups: [{name: g, rules: [{alert: B, expr: SELECT 2 AS value}]}]")
+
+		if snap.Fingerprint() != fpBefore {
+			t.Error("snapshot fingerprint changed after on-disk edit")
+		}
+		groups, err := snap.Parse()
+		if err != nil {
+			t.Fatalf("parse: %v", err)
+		}
+		if groups[0].Rules[0].Alert != "A" {
+			t.Errorf("snapshot parse saw on-disk edit: got alert %q", groups[0].Rules[0].Alert)
+		}
+	})
+}
+
+func TestFingerprintConfigMapSymlinkSwap(t *testing.T) {
+	dir := t.TempDir()
+	rules := "groups: [{name: g, rules: [{alert: A, expr: SELECT 1 AS value}]}]"
+	testutil.WriteConfigMapVolume(t, dir, map[string]string{"rules.yaml": rules})
+
+	pattern := []string{filepath.Join(dir, "*")}
+	fp1 := fingerprint(t, pattern)
+
+	// Rotating the payload directory without changing content must not
+	// change the fingerprint — kubelet does this on every volume sync.
+	testutil.WriteConfigMapVolume(t, dir, map[string]string{"rules.yaml": rules})
+	fp2 := fingerprint(t, pattern)
+	if fp1 != fp2 {
+		t.Errorf("payload dir rotation with identical content changed fingerprint: %d != %d", fp1, fp2)
+	}
+
+	// A content change through the same swap mechanism must change it.
+	changed := "groups: [{name: g, rules: [{alert: B, expr: SELECT 2 AS value}]}]"
+	testutil.WriteConfigMapVolume(t, dir, map[string]string{"rules.yaml": changed})
+	fp3 := fingerprint(t, pattern)
+	if fp3 == fp1 {
+		t.Error("content change via ..data swap did not change fingerprint")
+	}
+
+	// Parse must also read the swapped content correctly.
+	groups, err := Parse(pattern)
+	if err != nil {
+		t.Fatalf("parse after swap: %v", err)
+	}
+	if len(groups) != 1 || len(groups[0].Rules) != 1 || groups[0].Rules[0].Alert != "B" {
+		t.Errorf("parse did not see swapped content: %+v", groups)
 	}
 }

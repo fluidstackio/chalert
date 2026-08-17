@@ -374,14 +374,28 @@ func (ar *AlertingRule) alertsToSend(ts time.Time) []AlertInstance {
 
 // buildLabels merges query result dimensions with configured extra labels.
 // Extra labels take precedence; conflicting original labels get "exported_" prefix.
+//
+// Configured label values containing "{{" are rendered with the same template
+// pipeline as annotations, seeing the row's labels (before configured
+// overrides) as .Labels, matching vmalert. This runs before hashLabels():
+// the rendered value is the alert identity.
 func (ar *AlertingRule) buildLabels(m datasource.Metric) map[string]string {
 	labels := make(map[string]string, len(m.Labels)+len(ar.labels))
 	for _, l := range m.Labels {
 		labels[l.Name] = l.Value
 	}
+	var data annotationData
+	haveData := false
 	for k, v := range ar.labels {
 		if v == "" {
 			continue
+		}
+		if strings.Contains(v, "{{") {
+			if !haveData {
+				data = ar.templateData(m)
+				haveData = true
+			}
+			v = ar.renderTemplate("label", k, v, data)
 		}
 		if orig, exists := labels[k]; exists && orig != v {
 			labels["exported_"+k] = orig
@@ -395,22 +409,18 @@ func (ar *AlertingRule) buildLabels(m datasource.Metric) map[string]string {
 	return labels
 }
 
-// annotationData is the template context available in annotation templates.
-// Supports both Go template syntax (.Labels.X, .Value, .Expr) and legacy
-// vmalert-compatible $labels/$value variables.
+// annotationData is the template context available in label and annotation
+// templates. Supports both Go template syntax (.Labels.X, .Value, .Expr) and
+// legacy vmalert-compatible $labels/$value variables.
 type annotationData struct {
 	Labels map[string]string
 	Value  float64
 	Expr   string
 }
 
-// renderAnnotations renders annotation templates for an alert using text/template.
-// Templates can use .Labels.key, .Value, .Expr, and the legacy {{ $labels.key }} / {{ $value }}.
-func (ar *AlertingRule) renderAnnotations(m datasource.Metric, _ *AlertInstance) map[string]string {
-	if len(ar.annTpls) == 0 {
-		return nil
-	}
-
+// templateData builds the template context from a query result row.
+// Labels are the row's dimension labels, before configured labels override them.
+func (ar *AlertingRule) templateData(m datasource.Metric) annotationData {
 	labels := make(map[string]string, len(m.Labels))
 	for _, l := range m.Labels {
 		labels[l.Name] = l.Value
@@ -421,34 +431,49 @@ func (ar *AlertingRule) renderAnnotations(m datasource.Metric, _ *AlertInstance)
 		value = m.Values[0]
 	}
 
-	data := annotationData{
+	return annotationData{
 		Labels: labels,
 		Value:  value,
 		Expr:   ar.expr,
 	}
+}
+
+// renderTemplate renders a single template string with the given data.
+// On parse or exec error the raw string is returned and a warning is logged;
+// templating failures must never drop a label/annotation or fail evaluation.
+// kind distinguishes label and annotation templates in warning logs.
+func (ar *AlertingRule) renderTemplate(kind, key, tpl string, data annotationData) string {
+	// Rewrite legacy {{ $labels.X }} and {{ $value }} to Go template syntax.
+	normalized := normalizeLegacyTemplate(tpl)
+
+	t, err := template.New(key).Option("missingkey=zero").Parse(normalized)
+	if err != nil {
+		slog.Warn("chalert "+kind+" template parse error",
+			"rule", ar.name, "key", key, "error", err)
+		return tpl
+	}
+
+	var buf bytes.Buffer
+	if err := t.Execute(&buf, data); err != nil {
+		slog.Warn("chalert "+kind+" template exec error",
+			"rule", ar.name, "key", key, "error", err)
+		return tpl
+	}
+	return buf.String()
+}
+
+// renderAnnotations renders annotation templates for an alert using text/template.
+// Templates can use .Labels.key, .Value, .Expr, and the legacy {{ $labels.key }} / {{ $value }}.
+func (ar *AlertingRule) renderAnnotations(m datasource.Metric, _ *AlertInstance) map[string]string {
+	if len(ar.annTpls) == 0 {
+		return nil
+	}
+
+	data := ar.templateData(m)
 
 	out := make(map[string]string, len(ar.annTpls))
 	for k, tpl := range ar.annTpls {
-		// Rewrite legacy {{ $labels.X }} and {{ $value }} to Go template syntax.
-		normalized := normalizeLegacyTemplate(tpl)
-
-		t, err := template.New(k).Option("missingkey=zero").Parse(normalized)
-		if err != nil {
-			// Fall back to raw template on parse error.
-			slog.Warn("chalert annotation template parse error",
-				"rule", ar.name, "key", k, "error", err)
-			out[k] = tpl
-			continue
-		}
-
-		var buf bytes.Buffer
-		if err := t.Execute(&buf, data); err != nil {
-			slog.Warn("chalert annotation template exec error",
-				"rule", ar.name, "key", k, "error", err)
-			out[k] = tpl
-			continue
-		}
-		out[k] = buf.String()
+		out[k] = ar.renderTemplate("annotation", k, tpl, data)
 	}
 	return out
 }

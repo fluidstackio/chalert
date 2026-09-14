@@ -38,6 +38,8 @@ import (
 	"text/template"
 	"time"
 
+	"github.com/prometheus/common/helpers/templates"
+
 	"github.com/garbett1/chalert/config"
 	"github.com/garbett1/chalert/datasource"
 )
@@ -432,7 +434,9 @@ func (ar *AlertingRule) renderAnnotations(m datasource.Metric, _ *AlertInstance)
 		// Rewrite legacy {{ $labels.X }} and {{ $value }} to Go template syntax.
 		normalized := normalizeLegacyTemplate(tpl)
 
-		t, err := template.New(k).Option("missingkey=zero").Parse(normalized)
+		t, err := template.New(k).Funcs(template.FuncMap{
+			"humanizeDuration": templates.HumanizeDuration,
+		}).Option("missingkey=zero").Parse(normalized)
 		if err != nil {
 			// Fall back to raw template on parse error.
 			slog.Warn("chalert annotation template parse error",

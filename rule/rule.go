@@ -144,8 +144,9 @@ type AlertingRule struct {
 	expr      string
 	forDur    time.Duration
 	keepFire  time.Duration
-	labels    map[string]string // extra labels from config
-	annTpls   map[string]string // annotation templates
+	labels    map[string]string   // extra labels from config
+	annTpls   map[string]string   // annotation templates
+	annCols   map[string]struct{} // query columns for annotations only, not labels
 	groupName string
 	debug     bool
 
@@ -166,6 +167,13 @@ func NewAlertingRule(qb datasource.QuerierBuilder, groupName string, groupInterv
 	if cfg.Debug != nil {
 		debug = *cfg.Debug
 	}
+	var annCols map[string]struct{}
+	if len(cfg.AnnotationColumns) > 0 {
+		annCols = make(map[string]struct{}, len(cfg.AnnotationColumns))
+		for _, c := range cfg.AnnotationColumns {
+			annCols[c] = struct{}{}
+		}
+	}
 	return &AlertingRule{
 		ruleID:        cfg.ID,
 		name:          cfg.Alert,
@@ -174,6 +182,7 @@ func NewAlertingRule(qb datasource.QuerierBuilder, groupName string, groupInterv
 		keepFire:      cfg.KeepFiringFor.Duration(),
 		labels:        cfg.Labels,
 		annTpls:       cfg.Annotations,
+		annCols:       annCols,
 		groupName:     groupName,
 		groupInterval: groupInterval,
 		debug:         debug,
@@ -238,6 +247,8 @@ func (ar *AlertingRule) Exec(ctx context.Context, ts time.Time, limit int) ([]Al
 	seen := make(map[uint64]struct{})
 
 	for _, m := range res.Data {
+		var cols map[string]string
+		m, cols = ar.splitAnnotationColumns(m)
 		labels := ar.buildLabels(m)
 		alertID := hashLabels(labels)
 
@@ -256,7 +267,7 @@ func (ar *AlertingRule) Exec(ctx context.Context, ts time.Time, limit int) ([]Al
 				ar.logDebug(ts, a, "INACTIVE => PENDING")
 			}
 			a.Value = m.Values[0]
-			a.Annotations = ar.renderAnnotations(m, a)
+			a.Annotations = ar.renderAnnotations(m, cols)
 			a.KeepFiringSince = time.Time{}
 		} else {
 			// New alert
@@ -266,7 +277,7 @@ func (ar *AlertingRule) Exec(ctx context.Context, ts time.Time, limit int) ([]Al
 				GroupName:   ar.groupName,
 				AlertName:   ar.name,
 				Labels:      labels,
-				Annotations: ar.renderAnnotations(m, nil),
+				Annotations: ar.renderAnnotations(m, cols),
 				State:       StatePending,
 				Value:       m.Values[0],
 				Expr:        ar.expr,
@@ -372,6 +383,27 @@ func (ar *AlertingRule) alertsToSend(ts time.Time) []AlertInstance {
 	return out
 }
 
+// splitAnnotationColumns moves the rule's annotation columns out of a result
+// row's labels. It returns the row with only its label columns, and the
+// annotation columns by name. A row with no annotation columns comes back
+// unchanged. Empty columns never reach here: the datasource drops them.
+func (ar *AlertingRule) splitAnnotationColumns(m datasource.Metric) (datasource.Metric, map[string]string) {
+	if len(ar.annCols) == 0 {
+		return m, nil
+	}
+	cols := make(map[string]string, len(ar.annCols))
+	labels := make([]datasource.Label, 0, len(m.Labels))
+	for _, l := range m.Labels {
+		if _, ok := ar.annCols[l.Name]; ok {
+			cols[l.Name] = l.Value
+			continue
+		}
+		labels = append(labels, l)
+	}
+	m.Labels = labels
+	return m, cols
+}
+
 // buildLabels merges query result dimensions with configured extra labels.
 // Extra labels take precedence; conflicting original labels get "exported_" prefix.
 func (ar *AlertingRule) buildLabels(m datasource.Metric) map[string]string {
@@ -396,17 +428,20 @@ func (ar *AlertingRule) buildLabels(m datasource.Metric) map[string]string {
 }
 
 // annotationData is the template context available in annotation templates.
-// Supports both Go template syntax (.Labels.X, .Value, .Expr) and legacy
-// vmalert-compatible $labels/$value variables.
+// Supports both Go template syntax (.Labels.X, .Columns.X, .Value, .Expr) and
+// legacy vmalert-compatible $labels/$value variables, plus $columns.
 type annotationData struct {
-	Labels map[string]string
-	Value  float64
-	Expr   string
+	Labels  map[string]string
+	Columns map[string]string // the rule's annotation_columns; never labels
+	Value   float64
+	Expr    string
 }
 
 // renderAnnotations renders annotation templates for an alert using text/template.
-// Templates can use .Labels.key, .Value, .Expr, and the legacy {{ $labels.key }} / {{ $value }}.
-func (ar *AlertingRule) renderAnnotations(m datasource.Metric, _ *AlertInstance) map[string]string {
+// Templates can use .Labels.key, .Columns.key, .Value, .Expr, and the legacy
+// {{ $labels.key }} / {{ $columns.key }} / {{ $value }}. m holds the row's
+// label columns only; cols holds its annotation columns.
+func (ar *AlertingRule) renderAnnotations(m datasource.Metric, cols map[string]string) map[string]string {
 	if len(ar.annTpls) == 0 {
 		return nil
 	}
@@ -421,10 +456,15 @@ func (ar *AlertingRule) renderAnnotations(m datasource.Metric, _ *AlertInstance)
 		value = m.Values[0]
 	}
 
+	if cols == nil {
+		cols = map[string]string{}
+	}
+
 	data := annotationData{
-		Labels: labels,
-		Value:  value,
-		Expr:   ar.expr,
+		Labels:  labels,
+		Columns: cols,
+		Value:   value,
+		Expr:    ar.expr,
 	}
 
 	out := make(map[string]string, len(ar.annTpls))
@@ -454,9 +494,11 @@ func (ar *AlertingRule) renderAnnotations(m datasource.Metric, _ *AlertInstance)
 }
 
 // normalizeLegacyTemplate rewrites vmalert-compatible {{ $labels.X }} and {{ $value }}
-// to Go template equivalents {{ .Labels.X }} and {{ .Value }}.
+// to Go template equivalents {{ .Labels.X }} and {{ .Value }}, and chalert's
+// {{ $columns.X }} to {{ .Columns.X }}.
 func normalizeLegacyTemplate(s string) string {
 	s = strings.ReplaceAll(s, "$labels.", ".Labels.")
+	s = strings.ReplaceAll(s, "$columns.", ".Columns.")
 	s = strings.ReplaceAll(s, "$value", ".Value")
 	return s
 }

@@ -133,6 +133,29 @@ type StateStore interface {
 
 	// RecordHistory writes a state transition event to the audit log.
 	RecordHistory(ctx context.Context, instances []AlertInstance) error
+
+	// RecordEvaluations writes one row per rule evaluation to the
+	// evaluation log.
+	RecordEvaluations(ctx context.Context, evals []Evaluation) error
+}
+
+// Evaluation is the outcome of evaluating one rule once. It carries what the
+// rule_eval_* metrics carry, per evaluation, so a reader of ClickHouse can
+// tell a rule that ran and matched nothing from a rule that did not run or
+// whose query failed: neither of the last two writes alert_history rows.
+type Evaluation struct {
+	RuleID      uint64
+	GroupName   string
+	AlertName   string
+	EvaluatedAt time.Time
+	Duration    time.Duration
+	// OK is false when the rule's query failed or its evaluation panicked.
+	OK bool
+	// Samples is the number of alert instances the evaluation returned, the
+	// rule_eval_samples value; zero when OK is false.
+	Samples int
+	// Error is the failure's message when OK is false.
+	Error string
 }
 
 // AlertingRule evaluates a SQL expression and manages alert state transitions.

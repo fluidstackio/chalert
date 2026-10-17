@@ -137,10 +137,11 @@ A Go-side fallback (`HashRule` with whitespace normalization) is used for `--dry
 
 ### State Persistence
 
-Alert state is stored in two ClickHouse tables (auto-created on startup):
+Alert state is stored in three ClickHouse tables (auto-created on startup):
 
 - **`alert_state`** — `ReplacingMergeTree` keyed by `(rule_id, alert_hash)`. Current state for restart recovery. Read only on startup with `FINAL`.
 - **`alert_history`** — `MergeTree` append-only audit log. Every state transition gets a row. TTL'd at 90 days.
+- **`rule_evaluations`** — `MergeTree` append-only evaluation log. One row per rule per evaluation: `ok`, `samples`, `duration_ms` and the `error` of a failed query, the same facts as the `rule_eval_*` metrics. A rule that matched nothing and a rule whose query failed both write no `alert_history` row; this table tells them apart. TTL'd at 30 days.
 
 ### Hot Reload
 

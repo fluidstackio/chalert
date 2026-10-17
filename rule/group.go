@@ -175,7 +175,7 @@ func (g *Group) Start(ctx context.Context, notifier Notifier, store StateStore) 
 			"rules", len(rules),
 			"eval_ts", evalTS)
 
-		allAlerts := g.execRules(ctx, rules, evalTS, concurrency, limit)
+		allAlerts, evals := g.execRules(ctx, rules, evalTS, concurrency, limit)
 
 		var firing, resolved int
 		for _, a := range allAlerts {
@@ -217,6 +217,13 @@ func (g *Group) Start(ctx context.Context, notifier Notifier, store StateStore) 
 					"group", g.Name, "error", err)
 			}
 		}
+		// Every evaluation is recorded, whether or not it produced alerts.
+		if store != nil && len(evals) > 0 {
+			if err := store.RecordEvaluations(ctx, evals); err != nil {
+				slog.Error("chalert evaluation log write failed",
+					"group", g.Name, "error", err)
+			}
+		}
 	}
 
 	// First evaluation immediately
@@ -242,14 +249,18 @@ func (g *Group) Start(ctx context.Context, notifier Notifier, store StateStore) 
 	}
 }
 
-// execRules evaluates rules with the given concurrency.
-func (g *Group) execRules(ctx context.Context, rules []*AlertingRule, ts time.Time, concurrency, limit int) []AlertInstance {
+// execRules evaluates rules with the given concurrency. It returns the
+// alerts to send and one Evaluation per rule evaluated.
+func (g *Group) execRules(ctx context.Context, rules []*AlertingRule, ts time.Time, concurrency, limit int) ([]AlertInstance, []Evaluation) {
 	if concurrency <= 1 {
 		var all []AlertInstance
+		evals := make([]Evaluation, 0, len(rules))
 		for _, r := range rules {
 			start := time.Now()
 			alerts, err := r.Exec(ctx, ts, limit)
-			metrics.RuleEvalDuration.WithLabelValues(g.Name, r.Name()).Observe(time.Since(start).Seconds())
+			duration := time.Since(start)
+			metrics.RuleEvalDuration.WithLabelValues(g.Name, r.Name()).Observe(duration.Seconds())
+			evals = append(evals, g.evaluation(r, start, duration, len(alerts), err))
 			if err != nil {
 				metrics.RuleEvalErrors.WithLabelValues(g.Name, r.Name()).Inc()
 				slog.Error("chalert rule exec failed",
@@ -259,15 +270,19 @@ func (g *Group) execRules(ctx context.Context, rules []*AlertingRule, ts time.Ti
 			metrics.RuleEvalSamples.WithLabelValues(g.Name, r.Name()).Set(float64(len(alerts)))
 			all = append(all, alerts...)
 		}
-		return all
+		return all, evals
 	}
 
 	// Concurrent evaluation
 	type result struct {
 		alerts   []AlertInstance
 		err      error
-		rule     string
+		r        *AlertingRule
+		start    time.Time
 		duration time.Duration
+		// panicked marks a result sent from the recover path, whose error
+		// metric the recover path already counted.
+		panicked bool
 	}
 	results := make(chan result, len(rules))
 	sem := make(chan struct{}, concurrency)
@@ -278,19 +293,21 @@ func (g *Group) execRules(ctx context.Context, rules []*AlertingRule, ts time.Ti
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			start := time.Now()
 			defer func() {
 				if rec := recover(); rec != nil {
 					slog.Error("chalert panic in rule exec",
 						"rule", r.Name(), "group", g.Name, "panic", rec)
 					metrics.RuleEvalErrors.WithLabelValues(g.Name, r.Name()).Inc()
+					results <- result{err: fmt.Errorf("panic: %v", rec), r: r, start: start, duration: time.Since(start), panicked: true}
 				}
 			}()
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			start := time.Now()
+			start = time.Now()
 			alerts, err := r.Exec(ctx, ts, limit)
-			results <- result{alerts: alerts, err: err, rule: r.Name(), duration: time.Since(start)}
+			results <- result{alerts: alerts, err: err, r: r, start: start, duration: time.Since(start)}
 		}()
 	}
 
@@ -300,18 +317,37 @@ func (g *Group) execRules(ctx context.Context, rules []*AlertingRule, ts time.Ti
 	}()
 
 	var all []AlertInstance
+	evals := make([]Evaluation, 0, len(rules))
 	for res := range results {
-		metrics.RuleEvalDuration.WithLabelValues(g.Name, res.rule).Observe(res.duration.Seconds())
-		if res.err != nil {
-			metrics.RuleEvalErrors.WithLabelValues(g.Name, res.rule).Inc()
-			slog.Error("chalert rule exec failed",
-				"rule", res.rule, "group", g.Name, "error", res.err)
+		evals = append(evals, g.evaluation(res.r, res.start, res.duration, len(res.alerts), res.err))
+		if res.panicked {
 			continue
 		}
-		metrics.RuleEvalSamples.WithLabelValues(g.Name, res.rule).Set(float64(len(res.alerts)))
+		metrics.RuleEvalDuration.WithLabelValues(g.Name, res.r.Name()).Observe(res.duration.Seconds())
+		if res.err != nil {
+			metrics.RuleEvalErrors.WithLabelValues(g.Name, res.r.Name()).Inc()
+			slog.Error("chalert rule exec failed",
+				"rule", res.r.Name(), "group", g.Name, "error", res.err)
+			continue
+		}
+		metrics.RuleEvalSamples.WithLabelValues(g.Name, res.r.Name()).Set(float64(len(res.alerts)))
 		all = append(all, res.alerts...)
 	}
-	return all
+	return all, evals
+}
+
+// evaluation builds one rule's Evaluation from its Exec outcome.
+func (g *Group) evaluation(r *AlertingRule, start time.Time, duration time.Duration, samples int, err error) Evaluation {
+	e := Evaluation{
+		RuleID: r.ID(), GroupName: g.Name, AlertName: r.Name(),
+		EvaluatedAt: start, Duration: duration, OK: err == nil,
+	}
+	if err != nil {
+		e.Error = err.Error()
+	} else {
+		e.Samples = samples
+	}
+	return e
 }
 
 // updateWith replaces the group's rules with those from newGroup.

@@ -615,3 +615,51 @@ func TestEvalTimestampParameter(t *testing.T) {
 		t.Errorf("expected eval timestamp 2025-06-15, got %v", gotTS)
 	}
 }
+
+// TestRuleEvaluationsWritten writes evaluation rows through the real store
+// and reads them back: the table EnsureTables created accepts every column,
+// and an error longer than the bound is cut to it.
+func TestRuleEvaluationsWritten(t *testing.T) {
+	ctx := context.Background()
+	store := statestore.New(chConn, "default")
+	at := time.Now().UTC().Truncate(time.Millisecond)
+	long := strings.Repeat("x", 5000)
+	if err := store.RecordEvaluations(ctx, []rule.Evaluation{
+		{RuleID: 9001, GroupName: "g", AlertName: "Ok", EvaluatedAt: at, Duration: 120 * time.Millisecond, OK: true, Samples: 3},
+		{RuleID: 9002, GroupName: "g", AlertName: "Broken", EvaluatedAt: at, Duration: 5 * time.Millisecond, OK: false, Error: long},
+	}); err != nil {
+		t.Fatalf("RecordEvaluations: %s", err)
+	}
+	rows, err := chConn.Query(ctx, `SELECT rule_id, alert_name, evaluated_at, duration_ms, ok, samples, length(error)
+		FROM default.rule_evaluations WHERE rule_id IN (9001, 9002) ORDER BY rule_id`)
+	if err != nil {
+		t.Fatalf("query rule_evaluations: %s", err)
+	}
+	defer func() { _ = rows.Close() }()
+	type row struct {
+		id        uint64
+		alert     string
+		at        time.Time
+		ms        uint32
+		ok        bool
+		samples   uint32
+		errLength uint64
+	}
+	var got []row
+	for rows.Next() {
+		var r row
+		if err := rows.Scan(&r.id, &r.alert, &r.at, &r.ms, &r.ok, &r.samples, &r.errLength); err != nil {
+			t.Fatalf("scan: %s", err)
+		}
+		got = append(got, r)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d rows, want 2: %+v", len(got), got)
+	}
+	if r := got[0]; r.alert != "Ok" || !r.ok || r.samples != 3 || r.ms != 120 || r.errLength != 0 || !r.at.Equal(at) {
+		t.Errorf("ok row = %+v", r)
+	}
+	if r := got[1]; r.alert != "Broken" || r.ok || r.samples != 0 || r.errLength != 1024 {
+		t.Errorf("failed row = %+v", r)
+	}
+}

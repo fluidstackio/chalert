@@ -151,8 +151,8 @@ type Evaluation struct {
 	Duration    time.Duration
 	// OK is false when the rule's query failed or its evaluation panicked.
 	OK bool
-	// Samples is the number of alert instances the evaluation returned, the
-	// rule_eval_samples value; zero when OK is false.
+	// Samples is the number of rows the rule's query returned, pending and
+	// firing matches alike; zero when OK is false.
 	Samples int
 	// Error is the failure's message when OK is false.
 	Error string
@@ -523,6 +523,14 @@ func (ar *AlertingRule) GetAlerts() []AlertInstance {
 
 // Name returns the rule name.
 func (ar *AlertingRule) Name() string { return ar.name }
+
+// lastMatches is the number of rows the latest evaluation's query returned:
+// its matches, pending or firing, whatever was sent to notifiers.
+func (ar *AlertingRule) lastMatches() int {
+	ar.mu.Lock()
+	defer ar.mu.Unlock()
+	return ar.lastSamples
+}
 
 // ID returns the rule ID.
 func (ar *AlertingRule) ID() uint64 { return ar.ruleID }

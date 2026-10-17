@@ -141,7 +141,7 @@ Alert state is stored in three ClickHouse tables (auto-created on startup):
 
 - **`alert_state`** — `ReplacingMergeTree` keyed by `(rule_id, alert_hash)`. Current state for restart recovery. Read only on startup with `FINAL`.
 - **`alert_history`** — `MergeTree` append-only audit log. Every state transition gets a row. TTL'd at 90 days.
-- **`rule_evaluations`** — `MergeTree` append-only evaluation log. One row per rule per evaluation: `ok`, `samples`, `duration_ms` and the `error` of a failed query, the same facts as the `rule_eval_*` metrics. A rule that matched nothing and a rule whose query failed both write no `alert_history` row; this table tells them apart. TTL'd at 30 days.
+- **`rule_evaluations`** — `MergeTree` append-only evaluation log. One row per rule per evaluation: `ok`, `samples` (the query's matching rows, pending or firing), `duration_ms` and the `error` of a failed query; a panicking evaluation is recorded as failed on either evaluation path. A rule that matched nothing and a rule whose query failed both write no `alert_history` row; this table tells them apart. TTL'd at 30 days.
 
 ### Hot Reload
 

@@ -94,19 +94,40 @@ func TestExecRulesRecordsOneEvaluationPerRule(t *testing.T) {
 }
 
 // A rule whose evaluation panics is recorded as failed, beside the rules
-// that ran.
+// that ran, on the sequential path as on the concurrent one.
 func TestExecRulesRecordsAPanicAsFailed(t *testing.T) {
-	g := evalGroup(2, config.Rule{Alert: "Panics", Expr: exprPanics, ID: 1}, config.Rule{Alert: "Two", Expr: exprTwoRows, ID: 2})
-	alerts, evals := g.execRules(context.Background(), g.Rules, time.Now(), 2, 0)
-	got := byRule(evals)
-	if len(evals) != 2 {
-		t.Fatalf("got %d evaluations, want 2: %+v", len(evals), evals)
+	for name, concurrency := range map[string]int{"sequential": 1, "concurrent": 2} {
+		t.Run(name, func(t *testing.T) {
+			g := evalGroup(concurrency, config.Rule{Alert: "Panics", Expr: exprPanics, ID: 1}, config.Rule{Alert: "Two", Expr: exprTwoRows, ID: 2})
+			alerts, evals := g.execRules(context.Background(), g.Rules, time.Now(), concurrency, 0)
+			got := byRule(evals)
+			if len(evals) != 2 {
+				t.Fatalf("got %d evaluations, want 2: %+v", len(evals), evals)
+			}
+			if e := got[1]; e.OK || e.Error == "" {
+				t.Errorf("panicking rule: %+v", e)
+			}
+			if e := got[2]; !e.OK || e.Samples != 2 || len(alerts) != 2 {
+				t.Errorf("the other rule: %+v, alerts %d", e, len(alerts))
+			}
+		})
 	}
-	if e := got[1]; e.OK || e.Error == "" {
-		t.Errorf("panicking rule: %+v", e)
-	}
-	if e := got[2]; !e.OK || e.Samples != 2 || len(alerts) != 2 {
-		t.Errorf("the other rule: %+v, alerts %d", e, len(alerts))
+}
+
+// Samples counts the query's matches, not the alerts sent to notifiers: two
+// rows still pending under a `for` window send nothing and are two samples.
+func TestExecRulesCountsPendingMatches(t *testing.T) {
+	for name, concurrency := range map[string]int{"sequential": 1, "concurrent": 2} {
+		t.Run(name, func(t *testing.T) {
+			g := evalGroup(concurrency, config.Rule{Alert: "Pending", Expr: exprTwoRows, ID: 1, For: config.Duration{D: 5 * time.Minute}})
+			alerts, evals := g.execRules(context.Background(), g.Rules, time.Now(), concurrency, 0)
+			if len(alerts) != 0 {
+				t.Fatalf("pending rule sent %d alerts, want 0", len(alerts))
+			}
+			if e := byRule(evals)[1]; !e.OK || e.Samples != 2 {
+				t.Errorf("pending rule: %+v, want ok with 2 samples", e)
+			}
+		})
 	}
 }
 

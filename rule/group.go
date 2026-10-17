@@ -257,10 +257,13 @@ func (g *Group) execRules(ctx context.Context, rules []*AlertingRule, ts time.Ti
 		evals := make([]Evaluation, 0, len(rules))
 		for _, r := range rules {
 			start := time.Now()
-			alerts, err := r.Exec(ctx, ts, limit)
+			alerts, panicked, err := g.execRecovered(ctx, r, ts, limit)
 			duration := time.Since(start)
+			evals = append(evals, g.evaluation(r, start, duration, r.lastMatches(), err))
+			if panicked {
+				continue
+			}
 			metrics.RuleEvalDuration.WithLabelValues(g.Name, r.Name()).Observe(duration.Seconds())
-			evals = append(evals, g.evaluation(r, start, duration, len(alerts), err))
 			if err != nil {
 				metrics.RuleEvalErrors.WithLabelValues(g.Name, r.Name()).Inc()
 				slog.Error("chalert rule exec failed",
@@ -275,7 +278,9 @@ func (g *Group) execRules(ctx context.Context, rules []*AlertingRule, ts time.Ti
 
 	// Concurrent evaluation
 	type result struct {
-		alerts   []AlertInstance
+		alerts []AlertInstance
+		// samples is the query's match count, pending or firing.
+		samples  int
 		err      error
 		r        *AlertingRule
 		start    time.Time
@@ -307,7 +312,7 @@ func (g *Group) execRules(ctx context.Context, rules []*AlertingRule, ts time.Ti
 
 			start = time.Now()
 			alerts, err := r.Exec(ctx, ts, limit)
-			results <- result{alerts: alerts, err: err, r: r, start: start, duration: time.Since(start)}
+			results <- result{alerts: alerts, samples: r.lastMatches(), err: err, r: r, start: start, duration: time.Since(start)}
 		}()
 	}
 
@@ -319,7 +324,7 @@ func (g *Group) execRules(ctx context.Context, rules []*AlertingRule, ts time.Ti
 	var all []AlertInstance
 	evals := make([]Evaluation, 0, len(rules))
 	for res := range results {
-		evals = append(evals, g.evaluation(res.r, res.start, res.duration, len(res.alerts), res.err))
+		evals = append(evals, g.evaluation(res.r, res.start, res.duration, res.samples, res.err))
 		if res.panicked {
 			continue
 		}
@@ -334,6 +339,22 @@ func (g *Group) execRules(ctx context.Context, rules []*AlertingRule, ts time.Ti
 		all = append(all, res.alerts...)
 	}
 	return all, evals
+}
+
+// execRecovered runs one rule's Exec on the sequential path and turns a
+// panic into a failed result, as the concurrent path's recover does, so the
+// panicking rule's evaluation is still recorded and the other rules run.
+func (g *Group) execRecovered(ctx context.Context, r *AlertingRule, ts time.Time, limit int) (alerts []AlertInstance, panicked bool, err error) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			slog.Error("chalert panic in rule exec",
+				"rule", r.Name(), "group", g.Name, "panic", rec)
+			metrics.RuleEvalErrors.WithLabelValues(g.Name, r.Name()).Inc()
+			alerts, panicked, err = nil, true, fmt.Errorf("panic: %v", rec)
+		}
+	}()
+	alerts, err = r.Exec(ctx, ts, limit)
+	return alerts, false, err
 }
 
 // evaluation builds one rule's Evaluation from its Exec outcome.

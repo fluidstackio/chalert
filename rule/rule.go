@@ -131,8 +131,11 @@ type StateStore interface {
 	// LoadActive loads all Pending/Firing alert instances on startup.
 	LoadActive(ctx context.Context) ([]AlertInstance, error)
 
-	// RecordHistory writes a state transition event to the audit log.
-	RecordHistory(ctx context.Context, instances []AlertInstance) error
+	// RecordHistory writes a state transition event to the audit log, each
+	// row stamped evaluatedAt: the time its group's evaluation started, the
+	// same time that evaluation's log line carries, or the time a rule was
+	// retired for a row that ends its instances.
+	RecordHistory(ctx context.Context, evaluatedAt time.Time, instances []AlertInstance) error
 }
 
 // Evaluation is the outcome of evaluating one rule once, as the evaluation

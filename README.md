@@ -142,11 +142,11 @@ Alert state is stored in two ClickHouse tables (auto-created on startup):
 Every rule evaluation, success or failure, is also written to chalert's log as one JSON line with the message `chalert rule evaluation`: `rule_id` (a decimal string), `group`, `alert`, `evaluated_at`, `duration_ms`, `ok`, `samples` (the query's matching rows, pending or firing) and `error` (at most 1,024 bytes). A panicking evaluation is recorded as failed. A rule that matched nothing and a rule whose query failed both write no `alert_history` row; these lines tell them apart. The log collector ships them to ClickHouse, where a materialized view keeps them as a table.
 
 - **`alert_state`** — `ReplacingMergeTree` keyed by `(rule_id, alert_hash)`. Current state for restart recovery. Read only on startup with `FINAL`.
-- **`alert_history`** — `MergeTree` append-only audit log. Every state transition gets a row. TTL'd at 90 days.
+- **`alert_history`** — `MergeTree` append-only audit log. Every state transition gets a row. TTL'd at 90 days. A row's `evaluated_at` is the start of its group's evaluation, the same time that evaluation's log line carries; `event_time` is when the row was written.
 
 ### Hot Reload
 
-Rule files are hot-reloaded without restarting. Existing alert state is preserved for rules whose identity hasn't changed. New rules start fresh; removed rules are stopped gracefully. Reload failures (unreadable or invalid files) keep the previous rules running and are surfaced via `chalert_config_reloads_total{result="error"}` and `chalert_config_last_reload_successful`.
+Rule files are hot-reloaded without restarting. Existing alert state is preserved for rules whose identity hasn't changed. New rules start fresh; removed rules are stopped gracefully. A rule's identity is a hash of its query, name and labels, so an edit to any of them retires the rule and starts a new one. A retired rule, by an edit, by its group's removal, or by an edit made while chalert was down, gets an `inactive` `alert_history` row for each instance it held firing, so its history does not stay firing. No resolve is sent to the notifiers, since the edited rule usually fires the same alert again under its new identity. Reload failures (unreadable or invalid files) keep the previous rules running and are surfaced via `chalert_config_reloads_total{result="error"}` and `chalert_config_last_reload_successful`.
 
 Three triggers:
 

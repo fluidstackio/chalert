@@ -239,7 +239,11 @@ func main() {
 		g := rule.NewGroup(cfg, qb, groupOpts)
 		g.RestoreState(activeAlerts)
 		ruleGroups[g.ID()] = g
-
+	}
+	// A rule edited or removed while chalert was down left its restored
+	// instances to no rule: resolve them, as a reload does.
+	rule.RecordResolved(ctx, store, time.Now(), rule.Unclaimed(activeAlerts, ruleGroups))
+	for _, g := range ruleGroups {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -383,6 +387,7 @@ func reloadGroups(
 	for id, og := range existing {
 		if _, ok := newRegistry[id]; !ok {
 			og.Close()
+			og.Retire(ctx, store)
 			delete(existing, id)
 		}
 	}

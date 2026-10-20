@@ -175,7 +175,7 @@ func (g *Group) Start(ctx context.Context, notifier Notifier, store StateStore, 
 			"rules", len(rules),
 			"eval_ts", evalTS)
 
-		allAlerts, evals := g.execRules(ctx, rules, evalTS, concurrency, limit)
+		allAlerts, evals := g.execRules(ctx, rules, evalTS, evalStart, concurrency, limit)
 
 		var firing, resolved int
 		for _, a := range allAlerts {
@@ -212,7 +212,7 @@ func (g *Group) Start(ctx context.Context, notifier Notifier, store StateStore, 
 
 		// Persist state
 		if store != nil && len(allAlerts) > 0 {
-			if err := store.RecordHistory(ctx, allAlerts); err != nil {
+			if err := store.RecordHistory(ctx, evalStart, allAlerts); err != nil {
 				slog.Error("chalert state persistence failed",
 					"group", g.Name, "error", err)
 			}
@@ -237,9 +237,10 @@ func (g *Group) Start(ctx context.Context, notifier Notifier, store StateStore, 
 			return
 		case ng := <-g.updateCh:
 			g.mu.Lock()
-			g.updateWith(ng)
+			dropped := g.updateWith(ng)
 			g.mu.Unlock()
 			slog.Info("chalert group updated", "group", g.Name)
+			recordRetired(ctx, store, g.Name, dropped)
 		case ts := <-ticker.C:
 			eval(ctx, ts)
 		}
@@ -247,8 +248,9 @@ func (g *Group) Start(ctx context.Context, notifier Notifier, store StateStore, 
 }
 
 // execRules evaluates rules with the given concurrency. It returns the
-// alerts to send and one Evaluation per rule evaluated.
-func (g *Group) execRules(ctx context.Context, rules []*AlertingRule, ts time.Time, concurrency, limit int) ([]AlertInstance, []Evaluation) {
+// alerts to send and one Evaluation per rule evaluated, each stamped at, the
+// start of the group's evaluation, which its history rows carry too.
+func (g *Group) execRules(ctx context.Context, rules []*AlertingRule, ts, at time.Time, concurrency, limit int) ([]AlertInstance, []Evaluation) {
 	if concurrency <= 1 {
 		var all []AlertInstance
 		evals := make([]Evaluation, 0, len(rules))
@@ -256,7 +258,7 @@ func (g *Group) execRules(ctx context.Context, rules []*AlertingRule, ts time.Ti
 			start := time.Now()
 			alerts, panicked, err := g.execRecovered(ctx, r, ts, limit)
 			duration := time.Since(start)
-			evals = append(evals, g.evaluation(r, start, duration, r.lastMatches(), err))
+			evals = append(evals, g.evaluation(r, at, duration, r.lastMatches(), err))
 			if panicked {
 				continue
 			}
@@ -280,7 +282,6 @@ func (g *Group) execRules(ctx context.Context, rules []*AlertingRule, ts time.Ti
 		samples  int
 		err      error
 		r        *AlertingRule
-		start    time.Time
 		duration time.Duration
 		// panicked marks a result sent from the recover path, whose error
 		// metric the recover path already counted.
@@ -301,7 +302,7 @@ func (g *Group) execRules(ctx context.Context, rules []*AlertingRule, ts time.Ti
 					slog.Error("chalert panic in rule exec",
 						"rule", r.Name(), "group", g.Name, "panic", rec)
 					metrics.RuleEvalErrors.WithLabelValues(g.Name, r.Name()).Inc()
-					results <- result{err: fmt.Errorf("panic: %v", rec), r: r, start: start, duration: time.Since(start), panicked: true}
+					results <- result{err: fmt.Errorf("panic: %v", rec), r: r, duration: time.Since(start), panicked: true}
 				}
 			}()
 			sem <- struct{}{}
@@ -309,7 +310,7 @@ func (g *Group) execRules(ctx context.Context, rules []*AlertingRule, ts time.Ti
 
 			start = time.Now()
 			alerts, err := r.Exec(ctx, ts, limit)
-			results <- result{alerts: alerts, samples: r.lastMatches(), err: err, r: r, start: start, duration: time.Since(start)}
+			results <- result{alerts: alerts, samples: r.lastMatches(), err: err, r: r, duration: time.Since(start)}
 		}()
 	}
 
@@ -321,7 +322,7 @@ func (g *Group) execRules(ctx context.Context, rules []*AlertingRule, ts time.Ti
 	var all []AlertInstance
 	evals := make([]Evaluation, 0, len(rules))
 	for res := range results {
-		evals = append(evals, g.evaluation(res.r, res.start, res.duration, res.samples, res.err))
+		evals = append(evals, g.evaluation(res.r, at, res.duration, res.samples, res.err))
 		if res.panicked {
 			continue
 		}
@@ -355,10 +356,10 @@ func (g *Group) execRecovered(ctx context.Context, r *AlertingRule, ts time.Time
 }
 
 // evaluation builds one rule's Evaluation from its Exec outcome.
-func (g *Group) evaluation(r *AlertingRule, start time.Time, duration time.Duration, samples int, err error) Evaluation {
+func (g *Group) evaluation(r *AlertingRule, at time.Time, duration time.Duration, samples int, err error) Evaluation {
 	e := Evaluation{
 		RuleID: r.ID(), GroupName: g.Name, AlertName: r.Name(),
-		EvaluatedAt: start, Duration: duration, OK: err == nil,
+		EvaluatedAt: at, Duration: duration, OK: err == nil,
 	}
 	if err != nil {
 		e.Error = err.Error()
@@ -368,9 +369,10 @@ func (g *Group) evaluation(r *AlertingRule, start time.Time, duration time.Durat
 	return e
 }
 
-// updateWith replaces the group's rules with those from newGroup.
-// Must be called with mu held.
-func (g *Group) updateWith(ng *Group) {
+// updateWith replaces the group's rules with those from newGroup and returns
+// the rules it dropped: those whose ID no new rule carries, since an edit to
+// a rule's query, name or labels changes its ID. Must be called with mu held.
+func (g *Group) updateWith(ng *Group) []*AlertingRule {
 	// Build registry of new rules by ID
 	newRules := make(map[uint64]*AlertingRule)
 	for _, r := range ng.Rules {
@@ -378,7 +380,7 @@ func (g *Group) updateWith(ng *Group) {
 	}
 
 	// Update existing rules or mark for removal
-	var kept []*AlertingRule
+	var kept, dropped []*AlertingRule
 	for _, old := range g.Rules {
 		if nr, ok := newRules[old.ID()]; ok {
 			// Rule still exists — preserve alert state, update expression
@@ -393,8 +395,9 @@ func (g *Group) updateWith(ng *Group) {
 			old.mu.Unlock()
 			delete(newRules, nr.ID())
 			kept = append(kept, old)
+			continue
 		}
-		// If not in newRules, old rule is dropped (its alerts will naturally expire)
+		dropped = append(dropped, old)
 	}
 
 	// Add genuinely new rules
@@ -407,6 +410,75 @@ func (g *Group) updateWith(ng *Group) {
 	g.Labels = ng.Labels
 	g.Limit = ng.Limit
 	g.checksum = ng.checksum
+	return dropped
+}
+
+// Retire records a resolved history row for each instance the group's rules
+// hold firing. Called after Close on a group a reload removed; a shutdown
+// closes groups without retiring them, since their rules run again on start.
+func (g *Group) Retire(ctx context.Context, store StateStore) {
+	g.mu.RLock()
+	rules := g.Rules
+	g.mu.RUnlock()
+	recordRetired(ctx, store, g.Name, rules)
+}
+
+// Unclaimed returns the firing instances among a restart's restored state
+// whose rule ID matches no rule of the groups: a rule edited or removed
+// while chalert was down. Pending instances wrote no firing row and are
+// left out.
+func Unclaimed(instances []AlertInstance, groups map[uint64]*Group) []AlertInstance {
+	ids := map[uint64]bool{}
+	for _, g := range groups {
+		for _, r := range g.Rules {
+			ids[r.ID()] = true
+		}
+	}
+	var out []AlertInstance
+	for _, inst := range instances {
+		if inst.State == StateFiring && !ids[inst.RuleID] {
+			out = append(out, inst)
+		}
+	}
+	return out
+}
+
+// RecordResolved writes a resolved history row, stamped at, for each firing
+// instance: a rule that stopped running leaves no evaluation to resolve its
+// instances, and without the row each one's latest history row stays firing
+// for good. Nothing is sent to the notifiers: an edited rule usually fires
+// the same label set under its new ID, so a resolve sent for the old one
+// would end the alert the new one keeps.
+func RecordResolved(ctx context.Context, store StateStore, at time.Time, instances []AlertInstance) {
+	var resolved []AlertInstance
+	for _, inst := range instances {
+		if inst.State != StateFiring {
+			continue
+		}
+		inst.State = StateInactive
+		inst.ResolvedAt = at
+		resolved = append(resolved, inst)
+	}
+	if store == nil || len(resolved) == 0 {
+		return
+	}
+	if err := store.RecordHistory(ctx, at, resolved); err != nil {
+		slog.Error("chalert resolved rows for retired rules failed", "count", len(resolved), "error", err)
+		return
+	}
+	slog.Info("chalert resolved the firing instances of retired rules", "count", len(resolved))
+}
+
+// recordRetired resolves every firing instance of rules that stopped running.
+func recordRetired(ctx context.Context, store StateStore, group string, rules []*AlertingRule) {
+	var all []AlertInstance
+	for _, r := range rules {
+		all = append(all, r.GetAlerts()...)
+	}
+	if len(all) > 0 {
+		slog.Info("chalert retiring rules", "group", group, "rules", len(rules))
+	}
+	RecordResolved(ctx, store, time.Now(), all)
 }
 
 // Close stops the evaluation loop.

@@ -381,3 +381,97 @@ func TestHotReloadHTTPEndpointAndSIGHUP(t *testing.T) {
 		return len(firingAlerts("HotReloadD")) > 0
 	})
 }
+
+// latestStates returns each rule_id's latest alert_history state for one
+// alert name.
+func latestStates(t *testing.T, alert string) map[uint64]string {
+	t.Helper()
+	rows, err := chConn.Query(t.Context(), `
+		SELECT rule_id, argMax(state, event_time)
+		FROM default.alert_history
+		WHERE alert_name = ?
+		GROUP BY rule_id`, alert)
+	if err != nil {
+		t.Fatalf("query alert_history: %s", err)
+	}
+	defer func() { _ = rows.Close() }()
+	out := map[uint64]string{}
+	for rows.Next() {
+		var id uint64
+		var state string
+		if err := rows.Scan(&id, &state); err != nil {
+			t.Fatalf("scan: %s", err)
+		}
+		out[id] = state
+	}
+	return out
+}
+
+func retireRules(group, tier string) string {
+	return "groups:\n  - name: " + group + "\n    interval: 1s\n    rules:\n" + fmt.Sprintf(`      - alert: RetireA
+        expr: SELECT 'retire-a' AS service, 1 AS value
+        labels:
+          tier: %s
+`, tier)
+}
+
+// waitStates waits until RetireA's latest states per rule_id meet cond.
+func waitStates(t *testing.T, desc string, cond func(map[uint64]string) bool) map[uint64]string {
+	t.Helper()
+	var got map[uint64]string
+	waitFor(t, 60*time.Second, 500*time.Millisecond, desc, func() bool {
+		got = latestStates(t, "RetireA")
+		return cond(got)
+	})
+	return got
+}
+
+func count(states map[uint64]string, state string) int {
+	n := 0
+	for _, s := range states {
+		if s == state {
+			n++
+		}
+	}
+	return n
+}
+
+// A rule that stops running leaves no evaluation to resolve its instances:
+// chalert writes a resolved row for each, so no rule_id's latest history row
+// stays firing. Three ways a rule stops: an edit picked up by a reload, an
+// edit made while chalert was down, and a reload that removes its group.
+func TestRetiredRulesResolveTheirHistory(t *testing.T) {
+	if err := chConn.Exec(t.Context(), "DELETE FROM default.alert_history WHERE alert_name = 'RetireA'"); err != nil {
+		t.Fatalf("clear history: %s", err)
+	}
+	dir := t.TempDir()
+	files := func(rules string) {
+		testutil.WriteConfigMapVolume(t, dir, map[string]string{"rules.yaml": rules})
+	}
+	args := []string{"-rule=" + filepath.Join(dir, "*"), "-rule.configCheckInterval=500ms"}
+
+	files(retireRules("retire", "one"))
+	p := startChalert(t, args...)
+	waitStates(t, "first rule firing", func(s map[uint64]string) bool { return count(s, "firing") == 1 })
+
+	t.Log("an edit to the rule's labels gives it a new ID; the reload retires the old one")
+	files(retireRules("retire", "two"))
+	waitStates(t, "old rule resolved, new rule firing", func(s map[uint64]string) bool {
+		return len(s) == 2 && count(s, "firing") == 1 && count(s, "inactive") == 1
+	})
+
+	t.Log("an edit while chalert is down: the restart resolves the restored instance no rule claims")
+	_ = p.cmd.Process.Signal(syscall.SIGTERM)
+	_ = p.cmd.Wait()
+	files(retireRules("retire", "three"))
+	startChalert(t, args...)
+	waitStates(t, "second rule resolved at restart, third firing", func(s map[uint64]string) bool {
+		return len(s) == 3 && count(s, "firing") == 1 && count(s, "inactive") == 2
+	})
+
+	t.Log("a reload that removes the group retires its rules")
+	files(retireRules("retire-renamed", "four"))
+	waitStates(t, "third rule resolved with its group, fourth firing", func(s map[uint64]string) bool {
+		return len(s) == 4 && count(s, "firing") == 1 && count(s, "inactive") == 3
+	})
+}

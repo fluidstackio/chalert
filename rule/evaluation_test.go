@@ -70,7 +70,7 @@ func TestExecRulesRecordsOneEvaluationPerRule(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			g := evalGroup(concurrency, rules...)
 			before := time.Now()
-			_, evals := g.execRules(context.Background(), g.Rules, time.Now(), concurrency, 0)
+			_, evals := g.execRules(context.Background(), g.Rules, time.Now(), time.Now(), concurrency, 0)
 			if len(evals) != 3 {
 				t.Fatalf("got %d evaluations, want 3: %+v", len(evals), evals)
 			}
@@ -99,7 +99,7 @@ func TestExecRulesRecordsAPanicAsFailed(t *testing.T) {
 	for name, concurrency := range map[string]int{"sequential": 1, "concurrent": 2} {
 		t.Run(name, func(t *testing.T) {
 			g := evalGroup(concurrency, config.Rule{Alert: "Panics", Expr: exprPanics, ID: 1}, config.Rule{Alert: "Two", Expr: exprTwoRows, ID: 2})
-			alerts, evals := g.execRules(context.Background(), g.Rules, time.Now(), concurrency, 0)
+			alerts, evals := g.execRules(context.Background(), g.Rules, time.Now(), time.Now(), concurrency, 0)
 			got := byRule(evals)
 			if len(evals) != 2 {
 				t.Fatalf("got %d evaluations, want 2: %+v", len(evals), evals)
@@ -120,7 +120,7 @@ func TestExecRulesCountsPendingMatches(t *testing.T) {
 	for name, concurrency := range map[string]int{"sequential": 1, "concurrent": 2} {
 		t.Run(name, func(t *testing.T) {
 			g := evalGroup(concurrency, config.Rule{Alert: "Pending", Expr: exprTwoRows, ID: 1, For: config.Duration{D: 5 * time.Minute}})
-			alerts, evals := g.execRules(context.Background(), g.Rules, time.Now(), concurrency, 0)
+			alerts, evals := g.execRules(context.Background(), g.Rules, time.Now(), time.Now(), concurrency, 0)
 			if len(alerts) != 0 {
 				t.Fatalf("pending rule sent %d alerts, want 0", len(alerts))
 			}

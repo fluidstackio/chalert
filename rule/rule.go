@@ -133,16 +133,13 @@ type StateStore interface {
 
 	// RecordHistory writes a state transition event to the audit log.
 	RecordHistory(ctx context.Context, instances []AlertInstance) error
-
-	// RecordEvaluations writes one row per rule evaluation to the
-	// evaluation log.
-	RecordEvaluations(ctx context.Context, evals []Evaluation) error
 }
 
-// Evaluation is the outcome of evaluating one rule once. It carries what the
-// rule_eval_* metrics carry, per evaluation, so a reader of ClickHouse can
-// tell a rule that ran and matched nothing from a rule that did not run or
-// whose query failed: neither of the last two writes alert_history rows.
+// Evaluation is the outcome of evaluating one rule once, as the evaluation
+// log records it (EvaluationLog). It carries what the rule_eval_* metrics
+// carry, per evaluation, so a reader of ClickHouse can tell a rule that ran
+// and matched nothing from a rule that did not run or whose query failed:
+// neither of the last two writes alert_history rows.
 type Evaluation struct {
 	RuleID      uint64
 	GroupName   string

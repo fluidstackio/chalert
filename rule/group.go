@@ -143,7 +143,7 @@ func (g *Group) Checksum() string {
 }
 
 // Start begins the evaluation loop. Blocks until ctx is cancelled or Close() is called.
-func (g *Group) Start(ctx context.Context, notifier Notifier, store StateStore) {
+func (g *Group) Start(ctx context.Context, notifier Notifier, store StateStore, evalLog EvaluationRecorder) {
 	defer close(g.finishedCh)
 
 	slog.Info("chalert group started",
@@ -218,11 +218,8 @@ func (g *Group) Start(ctx context.Context, notifier Notifier, store StateStore) 
 			}
 		}
 		// Every evaluation is recorded, whether or not it produced alerts.
-		if store != nil && len(evals) > 0 {
-			if err := store.RecordEvaluations(ctx, evals); err != nil {
-				slog.Error("chalert evaluation log write failed",
-					"group", g.Name, "error", err)
-			}
+		if evalLog != nil && len(evals) > 0 {
+			evalLog.RecordEvaluations(evals)
 		}
 	}
 

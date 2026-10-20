@@ -131,46 +131,40 @@ func TestExecRulesCountsPendingMatches(t *testing.T) {
 	}
 }
 
-type recordingStore struct {
+type recordingLog struct {
 	mu    sync.Mutex
 	evals [][]Evaluation
 	got   chan struct{}
 }
 
-func (s *recordingStore) Save(context.Context, []AlertInstance) error { return nil }
-func (s *recordingStore) LoadActive(context.Context) ([]AlertInstance, error) {
-	return nil, nil
-}
-func (s *recordingStore) RecordHistory(context.Context, []AlertInstance) error { return nil }
-func (s *recordingStore) RecordEvaluations(_ context.Context, evals []Evaluation) error {
-	s.mu.Lock()
-	s.evals = append(s.evals, evals)
-	s.mu.Unlock()
+func (l *recordingLog) RecordEvaluations(evals []Evaluation) {
+	l.mu.Lock()
+	l.evals = append(l.evals, evals)
+	l.mu.Unlock()
 	select {
-	case s.got <- struct{}{}:
+	case l.got <- struct{}{}:
 	default:
 	}
-	return nil
 }
 
 // An evaluation that produces no alerts still reaches the evaluation log:
 // that is what tells a quiet rule from one that did not run.
 func TestStartRecordsEvaluationsWithoutAlerts(t *testing.T) {
 	g := evalGroup(1, config.Rule{Alert: "None", Expr: exprNoRows, ID: 7})
-	store := &recordingStore{got: make(chan struct{}, 1)}
+	log := &recordingLog{got: make(chan struct{}, 1)}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go func() { g.Start(ctx, nil, store); close(done) }()
+	go func() { g.Start(ctx, nil, nil, log); close(done) }()
 	select {
-	case <-store.got:
+	case <-log.got:
 	case <-time.After(5 * time.Second):
-		t.Fatal("no evaluation reached the store")
+		t.Fatal("no evaluation reached the evaluation log")
 	}
 	cancel()
 	<-done
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	if e := store.evals[0]; len(e) != 1 || e[0].RuleID != 7 || !e[0].OK || e[0].Samples != 0 {
+	log.mu.Lock()
+	defer log.mu.Unlock()
+	if e := log.evals[0]; len(e) != 1 || e[0].RuleID != 7 || !e[0].OK || e[0].Samples != 0 {
 		t.Errorf("recorded %+v", e)
 	}
 }

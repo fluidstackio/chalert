@@ -25,9 +25,6 @@ via Alertmanager.
                     │  ┌──────────────┐│
                     │  │alert_history │◄├── Audit log (write)
                     │  └──────────────┘│
-                    │  ┌──────────────┐│
-                    │  │rule_evals    │◄├── Evaluation log (write)
-                    │  └──────────────┘│
                     └──────────────────┘
 ```
 
@@ -78,7 +75,6 @@ The examples demonstrate this pattern.
 - In-memory state (rule package) is authoritative during runtime
 - ClickHouse `alert_state` table is written to periodically for crash recovery
 - `alert_history` table is append-only audit log with 90-day TTL
-- `rule_evaluations` table is an append-only evaluation log with 30-day TTL: one row per rule per evaluation, success or failure, written after each group evaluation
 - On restart, active alerts are loaded from `alert_state FINAL`
 
 ReplacingMergeTree's eventual consistency is acceptable because:

@@ -83,7 +83,7 @@ groups:
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			g.Start(ctx, nil, nil)
+			g.Start(ctx, nil, nil, nil)
 		}()
 	}
 	defer func() {
@@ -117,7 +117,7 @@ groups:
         expr: SELECT 'c' AS scope, 1 AS value
 `)
 
-	reloadGroups(ctx, registry, updated, qb, nil, nil, &wg, opts)
+	reloadGroups(ctx, registry, updated, qb, nil, nil, nil, &wg, opts)
 
 	if len(registry) != 2 {
 		t.Fatalf("expected 2 groups after reload, got %d", len(registry))
@@ -176,7 +176,7 @@ groups:
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			g.Start(ctx, nil, nil)
+			g.Start(ctx, nil, nil, nil)
 		}()
 	}
 	defer func() {
@@ -192,7 +192,7 @@ groups:
 		before = g
 	}
 
-	reloadGroups(ctx, registry, parseGroups(t, dir, yaml), qb, nil, nil, &wg, opts)
+	reloadGroups(ctx, registry, parseGroups(t, dir, yaml), qb, nil, nil, nil, &wg, opts)
 
 	if len(registry) != 1 {
 		t.Fatalf("expected 1 group, got %d", len(registry))

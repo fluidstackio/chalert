@@ -12,12 +12,6 @@
 //     Every state transition gets a row. TTL'd at 90 days by default.
 //     Used for debugging, postmortems, and compliance.
 //
-//  3. rule_evaluations — MergeTree append-only evaluation log.
-//     One row per rule per evaluation, success or failure, the same facts
-//     the rule_eval_* metrics carry. A rule that matched nothing and a rule
-//     whose query failed both write no alert_history row; this table tells
-//     them apart. TTL'd at 30 days.
-//
 // # Assumptions
 //
 //   - The in-memory state machine (in the rule package) is authoritative during runtime.
@@ -36,7 +30,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"math"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
@@ -63,25 +56,6 @@ CREATE TABLE IF NOT EXISTS %s.alert_state (
 ORDER BY (rule_id, alert_hash)
 SETTINGS index_granularity = 256
 `
-
-const ddlRuleEvaluations = `
-CREATE TABLE IF NOT EXISTS %s.rule_evaluations (
-    rule_id       UInt64,
-    group_name    LowCardinality(String),
-    alert_name    LowCardinality(String),
-    evaluated_at  DateTime64(3),
-    duration_ms   UInt32,
-    ok            Bool,
-    samples       UInt32,
-    error         String
-) ENGINE = MergeTree()
-PARTITION BY toYYYYMM(evaluated_at)
-ORDER BY (rule_id, evaluated_at)
-TTL evaluated_at + INTERVAL 30 DAY
-`
-
-// maxErrorLen bounds the error text one evaluation row stores.
-const maxErrorLen = 1024
 
 const ddlAlertHistory = `
 CREATE TABLE IF NOT EXISTS %s.alert_history (
@@ -113,13 +87,11 @@ func New(conn driver.Conn, database string) *Store {
 	return &Store{conn: conn, database: database}
 }
 
-// EnsureTables creates the alert_state, alert_history and rule_evaluations
-// tables if they don't exist.
+// EnsureTables creates the alert_state and alert_history tables if they don't exist.
 func (s *Store) EnsureTables(ctx context.Context) error {
 	stmts := []string{
 		fmt.Sprintf(ddlAlertState, s.database),
 		fmt.Sprintf(ddlAlertHistory, s.database),
-		fmt.Sprintf(ddlRuleEvaluations, s.database),
 		// Migration: add keep_firing_since column if missing (for upgrades from earlier schema).
 		fmt.Sprintf("ALTER TABLE %s.alert_state ADD COLUMN IF NOT EXISTS keep_firing_since Nullable(DateTime64(3)) AFTER annotations", s.database),
 	}
@@ -275,40 +247,6 @@ func (s *Store) RecordHistory(ctx context.Context, instances []rule.AlertInstanc
 	}
 	slog.Info("chalert history recorded", "count", len(instances), "database", s.database)
 	return nil
-}
-
-// RecordEvaluations writes one row per rule evaluation to the evaluation log.
-func (s *Store) RecordEvaluations(ctx context.Context, evals []rule.Evaluation) error {
-	if len(evals) == 0 {
-		return nil
-	}
-
-	batch, err := s.conn.PrepareBatch(ctx, fmt.Sprintf(
-		"INSERT INTO %s.rule_evaluations", s.database))
-	if err != nil {
-		return fmt.Errorf("preparing evaluation batch: %w", err)
-	}
-
-	for _, e := range evals {
-		msg := e.Error
-		if len(msg) > maxErrorLen {
-			msg = msg[:maxErrorLen]
-		}
-		if err := batch.Append(
-			e.RuleID,
-			e.GroupName,
-			e.AlertName,
-			e.EvaluatedAt,
-			uint32(min(e.Duration.Milliseconds(), math.MaxUint32)),
-			e.OK,
-			uint32(min(e.Samples, math.MaxUint32)),
-			msg,
-		); err != nil {
-			return fmt.Errorf("appending to evaluation batch: %w", err)
-		}
-	}
-
-	return batch.Send()
 }
 
 func stateToEnum(s rule.AlertState) string {

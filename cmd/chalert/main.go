@@ -225,6 +225,9 @@ func main() {
 
 	var wg sync.WaitGroup
 	ruleGroups := make(map[uint64]*rule.Group)
+	// The evaluation log rides chalert's log stream (stderr, as slog's
+	// default), which the log collector ships to ClickHouse.
+	evalLog := rule.NewEvaluationLog(os.Stderr)
 
 	groupOpts := rule.GroupOptions{
 		DefaultInterval: *evaluationInterval,
@@ -240,7 +243,7 @@ func main() {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			g.Start(ctx, notify, store)
+			g.Start(ctx, notify, store, evalLog)
 		}()
 	}
 
@@ -283,7 +286,7 @@ func main() {
 			metrics.ConfigLastReloadSuccessful.Set(0)
 			return
 		}
-		reloadGroups(ctx, ruleGroups, newGroups, qb, notify, store, &wg, groupOpts)
+		reloadGroups(ctx, ruleGroups, newGroups, qb, notify, store, evalLog, &wg, groupOpts)
 		lastFP = fp
 		metrics.ConfigReloads.WithLabelValues("success").Inc()
 		metrics.ConfigLastReloadSuccess.SetToCurrentTime()
@@ -366,6 +369,7 @@ func reloadGroups(
 	qb datasource.QuerierBuilder,
 	notify rule.Notifier,
 	store rule.StateStore,
+	evalLog rule.EvaluationRecorder,
 	wg *sync.WaitGroup,
 	opts rule.GroupOptions,
 ) {
@@ -394,7 +398,7 @@ func reloadGroups(
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				ng.Start(ctx, notify, store)
+				ng.Start(ctx, notify, store, evalLog)
 			}()
 		}
 	}

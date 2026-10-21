@@ -354,7 +354,7 @@ func main() {
 				}
 
 				// Final state persistence
-				persistAllState(context.Background(), ruleGroups, store)
+				persistAllState(context.Background(), ruleGroups, store, retirements)
 
 				// Shut down HTTP server
 				shutCtx, shutCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -411,13 +411,16 @@ func reloadGroups(
 	}
 }
 
-func persistAllState(ctx context.Context, groups map[uint64]*rule.Group, store rule.StateStore) {
+func persistAllState(ctx context.Context, groups map[uint64]*rule.Group, store rule.StateStore, retirements *rule.Retirements) {
 	var all []rule.AlertInstance
 	for _, g := range groups {
 		for _, r := range g.Rules {
 			all = append(all, r.GetAlerts()...)
 		}
 	}
+	// Retired instances whose resolved rows are unwritten are saved as
+	// firing, so the restart resolves them (rule.Retirements).
+	all = append(all, retirements.Unwritten()...)
 	if len(all) > 0 {
 		if err := store.Save(ctx, all); err != nil {
 			slog.Error("failed to persist final alert state", "error", err)

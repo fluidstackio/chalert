@@ -14,6 +14,7 @@ import (
 type recordingStore struct {
 	mu    sync.Mutex
 	calls []historyCall
+	saved []AlertInstance
 	got   chan struct{}
 }
 
@@ -24,7 +25,12 @@ type historyCall struct {
 
 func newRecordingStore() *recordingStore { return &recordingStore{got: make(chan struct{}, 16)} }
 
-func (s *recordingStore) Save(context.Context, []AlertInstance) error { return nil }
+func (s *recordingStore) Save(_ context.Context, instances []AlertInstance) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.saved = append(s.saved, instances...)
+	return nil
+}
 
 func (s *recordingStore) LoadActive(context.Context) ([]AlertInstance, error) { return nil, nil }
 
@@ -243,4 +249,33 @@ func TestARemovedGroupsFailedResolutionIsRetriedByAnotherGroup(t *testing.T) {
 	go other.Start(ctx, nil, store, nil)
 	store.waitFor(t, ofRule(1, StateInactive))
 	other.Close()
+}
+
+// EV-42: resolved rows still unwritten at shutdown are kept through the
+// alert state saved then, as the firing instances they were, so the
+// restart finds them unclaimed and resolves them; once written, the
+// instance's state is saved inactive, so a later restart does not resolve
+// it again.
+func TestUnwrittenRetirementsSurviveARestart(t *testing.T) {
+	down := &flakyStore{recordingStore: newRecordingStore(), fail: 1 << 30}
+	before := NewRetirements(down)
+	before.Resolve(context.Background(), time.Now(), []AlertInstance{
+		{ID: 1, RuleID: 9, State: StateFiring}, {ID: 2, RuleID: 9, State: StateFiring},
+	})
+	saved := before.Unwritten()
+	if len(saved) != 2 || saved[0].State != StateFiring || saved[0].RuleID != 9 {
+		t.Fatalf("unwritten = %+v, want the two instances as firing", saved)
+	}
+
+	up := newRecordingStore()
+	g := evalGroup(1, firingRule(5))
+	NewRetirements(up).Resolve(context.Background(), time.Now(), Unclaimed(saved, map[uint64]*Group{g.ID(): g}))
+	if call := up.waitFor(t, ofRule(9, StateInactive)); len(call.instances) != 2 {
+		t.Errorf("restart resolved %d instances, want 2", len(call.instances))
+	}
+	up.mu.Lock()
+	defer up.mu.Unlock()
+	if len(up.saved) != 2 || up.saved[0].State != StateInactive {
+		t.Errorf("state saved after the write = %+v, want both inactive", up.saved)
+	}
 }

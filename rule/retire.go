@@ -20,9 +20,10 @@ import (
 //
 // A write that fails is kept and retried by Flush, which every group's
 // evaluation calls, so a removed group's rows are written by the groups
-// that remain. The queue is held in memory: rows still pending when chalert
-// stops are lost, and only the instances that the alert state saved at
-// shutdown still holds are resolved after the restart (Unclaimed).
+// that remain. Rows still unwritten at shutdown go into the alert state
+// saved then, as the firing instances they were (Unwritten), so the restart
+// finds them unclaimed and resolves them. Once a write lands, the instances'
+// state is saved inactive, so no later restart resolves them again.
 type Retirements struct {
 	store StateStore
 
@@ -30,10 +31,12 @@ type Retirements struct {
 	pending []retirement
 }
 
-// retirement is one write of resolved rows, stamped at.
+// retirement is one write of resolved rows, stamped at, and the firing
+// instances they resolve.
 type retirement struct {
-	at   time.Time
-	rows []AlertInstance
+	at     time.Time
+	rows   []AlertInstance
+	firing []AlertInstance
 }
 
 // NewRetirements writes retirements to store; a nil store writes nothing.
@@ -43,11 +46,12 @@ func NewRetirements(store StateStore) *Retirements { return &Retirements{store: 
 // keeps the write for Flush when it fails. Pending instances wrote no
 // firing row and need none.
 func (r *Retirements) Resolve(ctx context.Context, at time.Time, instances []AlertInstance) {
-	var rows []AlertInstance
+	var rows, firing []AlertInstance
 	for _, inst := range instances {
 		if inst.State != StateFiring {
 			continue
 		}
+		firing = append(firing, inst)
 		inst.State = StateInactive
 		inst.ResolvedAt = at
 		rows = append(rows, inst)
@@ -56,7 +60,7 @@ func (r *Retirements) Resolve(ctx context.Context, at time.Time, instances []Ale
 		return
 	}
 	r.mu.Lock()
-	r.pending = append(r.pending, retirement{at: at, rows: rows})
+	r.pending = append(r.pending, retirement{at: at, rows: rows, firing: firing})
 	r.mu.Unlock()
 	r.Flush(ctx)
 }
@@ -79,9 +83,30 @@ func (r *Retirements) Flush(ctx context.Context) {
 			continue
 		}
 		slog.Info("chalert resolved the firing instances of retired rules", "count", len(p.rows))
+		// The saved state holds the retired instances as firing until it
+		// is told otherwise; a failure here only resolves them again at
+		// the next restart.
+		if err := r.store.Save(ctx, p.rows); err != nil {
+			slog.Error("chalert saving retired instances as inactive failed", "count", len(p.rows), "error", err)
+		}
 	}
 	r.pending = kept
 	metrics.RetiredRowsPending.Set(float64(countRows(kept)))
+}
+
+// Unwritten returns, as they were firing, the instances whose resolved rows
+// are not yet written.
+func (r *Retirements) Unwritten() []AlertInstance {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []AlertInstance
+	for _, p := range r.pending {
+		out = append(out, p.firing...)
+	}
+	return out
 }
 
 // Pending is the number of resolved rows not yet written.

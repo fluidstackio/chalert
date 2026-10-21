@@ -146,7 +146,7 @@ Every rule evaluation, success or failure, is also written to chalert's log as o
 
 ### Hot Reload
 
-Rule files are hot-reloaded without restarting. Existing alert state is preserved for rules whose identity hasn't changed. New rules start fresh; removed rules are stopped gracefully. A rule's identity is a hash of its query, name and labels, so an edit to any of them retires the rule and starts a new one. A retired rule, by an edit, by its group's removal, or by an edit made while chalert was down, gets an `inactive` `alert_history` row for each instance it held firing, so its history does not stay firing. No resolve is sent to the notifiers, since the edited rule usually fires the same alert again under its new identity. Reload failures (unreadable or invalid files) keep the previous rules running and are surfaced via `chalert_config_reloads_total{result="error"}` and `chalert_config_last_reload_successful`.
+Rule files are hot-reloaded without restarting. Existing alert state is preserved for rules whose identity hasn't changed. New rules start fresh; removed rules are stopped gracefully. A rule's identity is a hash of its query, name and labels, so an edit to any of them retires the rule and starts a new one. A retired rule, by an edit, by its group's removal, or by an edit made while chalert was down, gets an `inactive` `alert_history` row for each instance it held firing, so its history does not stay firing. No resolve is sent to the notifiers, since the edited rule usually fires the same alert again under its new identity. A write of those rows that fails is kept and retried on every group's next evaluation; `chalert_retired_rows_pending` counts the rows still waiting. The queue is held in memory, so rows still pending when chalert stops are lost: after the restart, only instances that the saved alert state still holds are resolved. Reload failures (unreadable or invalid files) keep the previous rules running and are surfaced via `chalert_config_reloads_total{result="error"}` and `chalert_config_last_reload_successful`.
 
 Three triggers:
 
@@ -216,6 +216,7 @@ Key metrics:
 | `chalert_alerts_active` | gauge | Active alert instances per rule/state |
 | `chalert_notifier_sends_total` | counter | Notification send attempts by URL/result |
 | `chalert_config_reloads_total` | counter | Config reload attempts by result |
+| `chalert_retired_rows_pending` | gauge | Resolved history rows of retired rules not yet written |
 | `chalert_config_last_reload_successful` | gauge | Whether the last reload attempt succeeded (1) or failed (0) |
 
 ## Development

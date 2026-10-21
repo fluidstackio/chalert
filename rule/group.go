@@ -36,6 +36,8 @@ type Group struct {
 	EvalDelay   *time.Duration
 	Labels      map[string]string
 	checksum    string
+	// retire writes the resolved rows of the group's retired rules.
+	retire *Retirements
 
 	doneCh     chan struct{}
 	finishedCh chan struct{}
@@ -56,6 +58,11 @@ type GroupOptions struct {
 	// DefaultLimit caps alert instances per rule when the group config
 	// does not specify a limit. 0 means unlimited.
 	DefaultLimit int
+
+	// Retirements writes retired rules' resolved rows for every group and
+	// retries the writes that fail. Nil gives the group its own, over the
+	// store its Start is given.
+	Retirements *Retirements
 }
 
 // NewGroup creates a new group from config.
@@ -84,6 +91,7 @@ func NewGroup(cfg config.Group, qb datasource.QuerierBuilder, opts GroupOptions)
 	} else if opts.DefaultLimit > 0 {
 		g.Limit = opts.DefaultLimit
 	}
+	g.retire = opts.Retirements
 	if cfg.EvalDelay != nil {
 		d := cfg.EvalDelay.Duration()
 		g.EvalDelay = &d
@@ -145,6 +153,9 @@ func (g *Group) Checksum() string {
 // Start begins the evaluation loop. Blocks until ctx is cancelled or Close() is called.
 func (g *Group) Start(ctx context.Context, notifier Notifier, store StateStore, evalLog EvaluationRecorder) {
 	defer close(g.finishedCh)
+	if g.retire == nil {
+		g.retire = NewRetirements(store)
+	}
 
 	slog.Info("chalert group started",
 		"group", g.Name,
@@ -159,6 +170,9 @@ func (g *Group) Start(ctx context.Context, notifier Notifier, store StateStore, 
 		limit := g.Limit
 		g.mu.RUnlock()
 
+		// Retirement rows that failed to write are retried on every
+		// group's evaluation, whichever group retired them.
+		g.retire.Flush(ctx)
 		if len(rules) == 0 {
 			return
 		}
@@ -240,7 +254,7 @@ func (g *Group) Start(ctx context.Context, notifier Notifier, store StateStore, 
 			dropped := g.updateWith(ng)
 			g.mu.Unlock()
 			slog.Info("chalert group updated", "group", g.Name)
-			recordRetired(ctx, store, g.Name, dropped)
+			g.retireRules(ctx, dropped)
 		case ts := <-ticker.C:
 			eval(ctx, ts)
 		}
@@ -413,14 +427,27 @@ func (g *Group) updateWith(ng *Group) []*AlertingRule {
 	return dropped
 }
 
-// Retire records a resolved history row for each instance the group's rules
-// hold firing. Called after Close on a group a reload removed; a shutdown
-// closes groups without retiring them, since their rules run again on start.
-func (g *Group) Retire(ctx context.Context, store StateStore) {
+// Retire resolves each instance the group's rules hold firing. Called
+// after Close on a group a reload removed; a shutdown closes groups without
+// retiring them, since their rules run again on start.
+func (g *Group) Retire(ctx context.Context) {
 	g.mu.RLock()
 	rules := g.Rules
 	g.mu.RUnlock()
-	recordRetired(ctx, store, g.Name, rules)
+	g.retireRules(ctx, rules)
+}
+
+// retireRules resolves every firing instance of rules that stopped running.
+func (g *Group) retireRules(ctx context.Context, rules []*AlertingRule) {
+	var all []AlertInstance
+	for _, r := range rules {
+		all = append(all, r.GetAlerts()...)
+	}
+	if len(all) == 0 || g.retire == nil {
+		return
+	}
+	slog.Info("chalert retiring rules", "group", g.Name, "rules", len(rules))
+	g.retire.Resolve(ctx, time.Now(), all)
 }
 
 // Unclaimed returns the firing instances among a restart's restored state
@@ -441,44 +468,6 @@ func Unclaimed(instances []AlertInstance, groups map[uint64]*Group) []AlertInsta
 		}
 	}
 	return out
-}
-
-// RecordResolved writes a resolved history row, stamped at, for each firing
-// instance: a rule that stopped running leaves no evaluation to resolve its
-// instances, and without the row each one's latest history row stays firing
-// for good. Nothing is sent to the notifiers: an edited rule usually fires
-// the same label set under its new ID, so a resolve sent for the old one
-// would end the alert the new one keeps.
-func RecordResolved(ctx context.Context, store StateStore, at time.Time, instances []AlertInstance) {
-	var resolved []AlertInstance
-	for _, inst := range instances {
-		if inst.State != StateFiring {
-			continue
-		}
-		inst.State = StateInactive
-		inst.ResolvedAt = at
-		resolved = append(resolved, inst)
-	}
-	if store == nil || len(resolved) == 0 {
-		return
-	}
-	if err := store.RecordHistory(ctx, at, resolved); err != nil {
-		slog.Error("chalert resolved rows for retired rules failed", "count", len(resolved), "error", err)
-		return
-	}
-	slog.Info("chalert resolved the firing instances of retired rules", "count", len(resolved))
-}
-
-// recordRetired resolves every firing instance of rules that stopped running.
-func recordRetired(ctx context.Context, store StateStore, group string, rules []*AlertingRule) {
-	var all []AlertInstance
-	for _, r := range rules {
-		all = append(all, r.GetAlerts()...)
-	}
-	if len(all) > 0 {
-		slog.Info("chalert retiring rules", "group", group, "rules", len(rules))
-	}
-	RecordResolved(ctx, store, time.Now(), all)
 }
 
 // Close stops the evaluation loop.

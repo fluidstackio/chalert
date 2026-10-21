@@ -61,6 +61,14 @@ var (
 		Help:      "Timestamp of the last successful config reload.",
 	})
 
+	// RetiredRowsPending is the number of retired rules' resolved history
+	// rows whose write failed and waits for a retry.
+	RetiredRowsPending = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "chalert",
+		Name:      "retired_rows_pending",
+		Help:      "Resolved history rows of retired rules not yet written.",
+	})
+
 	// ConfigLastReloadSuccessful reports whether the last config reload attempt succeeded (1) or failed (0).
 	ConfigLastReloadSuccessful = prometheus.NewGauge(prometheus.GaugeOpts{
 		Namespace: "chalert",
@@ -78,6 +86,7 @@ func init() {
 		NotifierSends,
 		NotifierErrors,
 		ConfigReloads,
+		RetiredRowsPending,
 		ConfigLastReloadSuccess,
 		ConfigLastReloadSuccessful,
 	)

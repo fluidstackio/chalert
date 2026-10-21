@@ -2,6 +2,7 @@ package rule
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -148,7 +149,7 @@ func TestRetireResolvesARemovedGroupsFiringInstances(t *testing.T) {
 	go g.Start(ctx, nil, store, nil)
 	store.waitFor(t, ofRule(1, StateFiring))
 	g.Close()
-	g.Retire(ctx, store)
+	g.Retire(ctx)
 	call := store.waitFor(t, ofRule(1, StateInactive))
 	if len(call.instances) != 2 {
 		t.Errorf("resolved %d instances, want 2", len(call.instances))
@@ -167,4 +168,79 @@ func TestUnclaimedIsTheFiringStateOfNoRule(t *testing.T) {
 	if len(got) != 1 || got[0].ID != 11 {
 		t.Errorf("unclaimed = %+v, want only instance 11", got)
 	}
+}
+
+// flakyStore fails its first fail writes of resolved rows; it records only
+// writes that succeed.
+type flakyStore struct {
+	*recordingStore
+	mu   sync.Mutex
+	fail int
+}
+
+func (s *flakyStore) RecordHistory(ctx context.Context, at time.Time, instances []AlertInstance) error {
+	s.mu.Lock()
+	if s.fail > 0 && len(instances) > 0 && instances[0].State == StateInactive {
+		s.fail--
+		s.mu.Unlock()
+		return errors.New("insert failed")
+	}
+	s.mu.Unlock()
+	return s.recordingStore.RecordHistory(ctx, at, instances)
+}
+
+func fastGroup(name string, opts GroupOptions, rules ...config.Rule) *Group {
+	opts.DefaultInterval = time.Minute
+	return NewGroup(config.Group{Name: name, Interval: config.Duration{D: 20 * time.Millisecond}, Concurrency: 1, Rules: rules},
+		&fakeQuerierBuilder{q: evalQuerier()}, opts)
+}
+
+// EV-42: a retirement whose write fails is kept, counted, and written by a
+// later flush; a pending instance needs no row.
+func TestRetirementsKeepAFailedWriteUntilAFlushLandsIt(t *testing.T) {
+	store := &flakyStore{recordingStore: newRecordingStore(), fail: 1}
+	r := NewRetirements(store)
+	at := time.Now()
+	r.Resolve(context.Background(), at, []AlertInstance{
+		{ID: 1, RuleID: 9, State: StateFiring}, {ID: 2, RuleID: 9, State: StateFiring}, {ID: 3, RuleID: 9, State: StatePending},
+	})
+	if got := r.Pending(); got != 2 {
+		t.Fatalf("pending = %d after a failed write, want 2", got)
+	}
+	r.Flush(context.Background())
+	call := store.waitFor(t, ofRule(9, StateInactive))
+	if len(call.instances) != 2 || !call.at.Equal(at) || r.Pending() != 0 {
+		t.Errorf("flush wrote %d rows at %s, pending %d; want 2 at %s, 0 pending", len(call.instances), call.at, r.Pending(), at)
+	}
+}
+
+// EV-42: a dropped rule's resolution that fails is written by the group's
+// next evaluation.
+func TestADroppedRulesFailedResolutionIsRetried(t *testing.T) {
+	store := &flakyStore{recordingStore: newRecordingStore(), fail: 1}
+	g := fastGroup("g", GroupOptions{}, firingRule(1))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go g.Start(ctx, nil, store, nil)
+	store.waitFor(t, ofRule(1, StateFiring))
+	g.UpdateWith(fastGroup("g", GroupOptions{}, firingRule(2)))
+	store.waitFor(t, ofRule(1, StateInactive))
+	g.Close()
+}
+
+// EV-42: a removed group's retirement that fails is written by another
+// group's evaluation, since the removed group runs no more.
+func TestARemovedGroupsFailedResolutionIsRetriedByAnotherGroup(t *testing.T) {
+	store := &flakyStore{recordingStore: newRecordingStore(), fail: 1}
+	opts := GroupOptions{Retirements: NewRetirements(store)}
+	removed, other := fastGroup("removed", opts, firingRule(1)), fastGroup("other", opts, config.Rule{Alert: "None", Expr: exprNoRows, ID: 5})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go removed.Start(ctx, nil, store, nil)
+	store.waitFor(t, ofRule(1, StateFiring))
+	removed.Close()
+	removed.Retire(ctx)
+	go other.Start(ctx, nil, store, nil)
+	store.waitFor(t, ofRule(1, StateInactive))
+	other.Close()
 }

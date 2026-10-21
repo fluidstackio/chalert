@@ -229,10 +229,12 @@ func main() {
 	// default), which the log collector ships to ClickHouse.
 	evalLog := rule.NewEvaluationLog(os.Stderr)
 
+	retirements := rule.NewRetirements(store)
 	groupOpts := rule.GroupOptions{
 		DefaultInterval: *evaluationInterval,
 		ExternalLabels:  externalLabels,
 		DefaultLimit:    *defaultLimit,
+		Retirements:     retirements,
 	}
 
 	for _, cfg := range groups {
@@ -242,7 +244,7 @@ func main() {
 	}
 	// A rule edited or removed while chalert was down left its restored
 	// instances to no rule: resolve them, as a reload does.
-	rule.RecordResolved(ctx, store, time.Now(), rule.Unclaimed(activeAlerts, ruleGroups))
+	retirements.Resolve(ctx, time.Now(), rule.Unclaimed(activeAlerts, ruleGroups))
 	for _, g := range ruleGroups {
 		wg.Add(1)
 		go func() {
@@ -387,7 +389,7 @@ func reloadGroups(
 	for id, og := range existing {
 		if _, ok := newRegistry[id]; !ok {
 			og.Close()
-			og.Retire(ctx, store)
+			og.Retire(ctx)
 			delete(existing, id)
 		}
 	}

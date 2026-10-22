@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1](https://github.com/fluidstackio/chalert/compare/v0.5.0...v0.5.1) (2026-10-20)
+
+
+### Bug Fixes
+
+* **deps:** bump Go toolchain to 1.26.10 ([#18](https://github.com/fluidstackio/chalert/issues/18)) ([d49339a](https://github.com/fluidstackio/chalert/commit/d49339a5d2eb9cbe9cd4cf207f108ad7019506df))
+
 ## [0.5.0](https://github.com/fluidstackio/chalert/compare/v0.4.0...v0.5.0) (2026-08-17)
 
 

@@ -158,6 +158,98 @@ groups:
 `,
 		},
 		{
+			name: "recording rule with annotation_columns",
+			yaml: `
+groups:
+  - name: g
+    rules:
+      - record: foo
+        expr: SELECT 'x' AS a, 1 AS value
+        annotation_columns: [a]
+`,
+		},
+		{
+			name: "annotation_columns names value",
+			yaml: `
+groups:
+  - name: g
+    rules:
+      - alert: foo
+        expr: SELECT 1 AS value
+        annotation_columns: [value]
+`,
+		},
+		{
+			name: "annotation_columns names empty name",
+			yaml: `
+groups:
+  - name: g
+    rules:
+      - alert: foo
+        expr: SELECT 'x' AS a, 1 AS value
+        annotation_columns: [""]
+`,
+		},
+		{
+			name: "annotation_columns names ts",
+			yaml: `
+groups:
+  - name: g
+    rules:
+      - alert: foo
+        expr: SELECT 'x' AS a, 1 AS value
+        annotation_columns: [ts]
+`,
+		},
+		{
+			name: "annotation_columns names alertname",
+			yaml: `
+groups:
+  - name: g
+    rules:
+      - alert: foo
+        expr: SELECT 'x' AS a, 1 AS value
+        annotation_columns: [alertname]
+`,
+		},
+		{
+			name: "annotation_columns lists a column twice",
+			yaml: `
+groups:
+  - name: g
+    rules:
+      - alert: foo
+        expr: SELECT 'x' AS a, 1 AS value
+        annotation_columns: [a, a]
+`,
+		},
+		{
+			name: "annotation column is also a configured label",
+			yaml: `
+groups:
+  - name: g
+    rules:
+      - alert: foo
+        expr: SELECT 'x' AS a, 1 AS value
+        labels:
+          a: y
+        annotation_columns: [a]
+`,
+		},
+		{
+			name: "annotation column is also a group label",
+			yaml: `
+groups:
+  - name: g
+    labels:
+      a: y
+    rules:
+      - alert: foo
+        expr: SELECT 'x' AS a, 1 AS value
+        annotation_columns: [a]
+`,
+		},
+		{
 			name: "duplicate rules",
 			yaml: `
 groups:
@@ -601,5 +693,54 @@ func TestFingerprintConfigMapSymlinkSwap(t *testing.T) {
 	}
 	if len(groups) != 1 || len(groups[0].Rules) != 1 || groups[0].Rules[0].Alert != "B" {
 		t.Errorf("parse did not see swapped content: %+v", groups)
+	}
+}
+
+func TestAnnotationColumnsParseAndRuleID(t *testing.T) {
+	write := func(t *testing.T, body string) []Group {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "rules.yaml")
+		if err := os.WriteFile(path, []byte(body), 0644); err != nil {
+			t.Fatal(err)
+		}
+		groups, err := Parse([]string{path})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return groups
+	}
+	const base = `
+groups:
+  - name: g
+    rules:
+      - alert: LinkDown
+        expr: SELECT 'c1' AS port, '555-0100' AS noc, 1 AS value
+`
+	with := write(t, base+"        annotation_columns: [noc]\n")
+	without := write(t, base)
+
+	got := with[0].Rules[0].AnnotationColumns
+	if len(got) != 1 || got[0] != "noc" {
+		t.Fatalf("annotation_columns: got %v", got)
+	}
+	// Adding annotation columns must not change the rule ID, or in-flight
+	// alert state would be dropped on the next reload.
+	if a, b := with[0].Rules[0].ID, without[0].Rules[0].ID; a != b {
+		t.Errorf("rule ID changed with annotation_columns: %d vs %d", a, b)
+	}
+}
+
+func TestAnnotationColumnsNormalizedRuleID(t *testing.T) {
+	// Production rule IDs come from NormalizeRuleIDs, not HashRule.
+	queryHash := func(expr string) (uint64, error) { return uint64(len(expr)), nil }
+	rule := Rule{Alert: "LinkDown", Expr: "SELECT 'c1' AS port, 'x' AS noc, 1 AS value"}
+	withCols := rule
+	withCols.AnnotationColumns = []string{"noc"}
+	groups := []Group{{Name: "a", Rules: []Rule{rule}}, {Name: "b", Rules: []Rule{withCols}}}
+	if err := NormalizeRuleIDs(groups, queryHash); err != nil {
+		t.Fatal(err)
+	}
+	if a, b := groups[0].Rules[0].ID, groups[1].Rules[0].ID; a != b {
+		t.Errorf("normalized rule ID changed with annotation_columns: %d vs %d", a, b)
 	}
 }

@@ -225,22 +225,31 @@ func main() {
 
 	var wg sync.WaitGroup
 	ruleGroups := make(map[uint64]*rule.Group)
+	// The evaluation log rides chalert's log stream (stderr, as slog's
+	// default), which the log collector ships to ClickHouse.
+	evalLog := rule.NewEvaluationLog(os.Stderr)
 
+	retirements := rule.NewRetirements(store)
 	groupOpts := rule.GroupOptions{
 		DefaultInterval: *evaluationInterval,
 		ExternalLabels:  externalLabels,
 		DefaultLimit:    *defaultLimit,
+		Retirements:     retirements,
 	}
 
 	for _, cfg := range groups {
 		g := rule.NewGroup(cfg, qb, groupOpts)
 		g.RestoreState(activeAlerts)
 		ruleGroups[g.ID()] = g
-
+	}
+	// A rule edited or removed while chalert was down left its restored
+	// instances to no rule: resolve them, as a reload does.
+	retirements.Resolve(ctx, time.Now(), rule.Unclaimed(activeAlerts, ruleGroups))
+	for _, g := range ruleGroups {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			g.Start(ctx, notify, store)
+			g.Start(ctx, notify, store, evalLog)
 		}()
 	}
 
@@ -283,7 +292,7 @@ func main() {
 			metrics.ConfigLastReloadSuccessful.Set(0)
 			return
 		}
-		reloadGroups(ctx, ruleGroups, newGroups, qb, notify, store, &wg, groupOpts)
+		reloadGroups(ctx, ruleGroups, newGroups, qb, notify, store, evalLog, &wg, groupOpts)
 		lastFP = fp
 		metrics.ConfigReloads.WithLabelValues("success").Inc()
 		metrics.ConfigLastReloadSuccess.SetToCurrentTime()
@@ -345,7 +354,7 @@ func main() {
 				}
 
 				// Final state persistence
-				persistAllState(context.Background(), ruleGroups, store)
+				persistAllState(context.Background(), ruleGroups, store, retirements)
 
 				// Shut down HTTP server
 				shutCtx, shutCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -366,6 +375,7 @@ func reloadGroups(
 	qb datasource.QuerierBuilder,
 	notify rule.Notifier,
 	store rule.StateStore,
+	evalLog rule.EvaluationRecorder,
 	wg *sync.WaitGroup,
 	opts rule.GroupOptions,
 ) {
@@ -379,6 +389,7 @@ func reloadGroups(
 	for id, og := range existing {
 		if _, ok := newRegistry[id]; !ok {
 			og.Close()
+			og.Retire(ctx)
 			delete(existing, id)
 		}
 	}
@@ -394,19 +405,22 @@ func reloadGroups(
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				ng.Start(ctx, notify, store)
+				ng.Start(ctx, notify, store, evalLog)
 			}()
 		}
 	}
 }
 
-func persistAllState(ctx context.Context, groups map[uint64]*rule.Group, store rule.StateStore) {
+func persistAllState(ctx context.Context, groups map[uint64]*rule.Group, store rule.StateStore, retirements *rule.Retirements) {
 	var all []rule.AlertInstance
 	for _, g := range groups {
 		for _, r := range g.Rules {
 			all = append(all, r.GetAlerts()...)
 		}
 	}
+	// Retired instances whose resolved rows are unwritten are saved as
+	// firing, so the restart resolves them (rule.Retirements).
+	all = append(all, retirements.Unwritten()...)
 	if len(all) > 0 {
 		if err := store.Save(ctx, all); err != nil {
 			slog.Error("failed to persist final alert state", "error", err)

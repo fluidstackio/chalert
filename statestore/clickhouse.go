@@ -212,7 +212,7 @@ func (s *Store) LoadActive(ctx context.Context) ([]rule.AlertInstance, error) {
 }
 
 // RecordHistory writes state transition events to the audit log.
-func (s *Store) RecordHistory(ctx context.Context, instances []rule.AlertInstance) error {
+func (s *Store) RecordHistory(ctx context.Context, evaluatedAt time.Time, instances []rule.AlertInstance) error {
 	if len(instances) == 0 {
 		return nil
 	}
@@ -235,8 +235,8 @@ func (s *Store) RecordHistory(ctx context.Context, instances []rule.AlertInstanc
 			inst.Value,
 			inst.Expr,
 			inst.Annotations,
-			now, // evaluated_at
-			now, // event_time (DEFAULT now64(3) but explicit for batch)
+			evaluatedAt,
+			now, // event_time: when the row was written
 		); err != nil {
 			return fmt.Errorf("appending to history batch: %w", err)
 		}

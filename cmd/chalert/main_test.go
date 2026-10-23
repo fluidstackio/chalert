@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"hash/fnv"
 	"os"
 	"path/filepath"
@@ -83,7 +84,7 @@ groups:
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			g.Start(ctx, nil, nil)
+			g.Start(ctx, nil, nil, nil)
 		}()
 	}
 	defer func() {
@@ -117,7 +118,7 @@ groups:
         expr: SELECT 'c' AS scope, 1 AS value
 `)
 
-	reloadGroups(ctx, registry, updated, qb, nil, nil, &wg, opts)
+	reloadGroups(ctx, registry, updated, qb, nil, nil, nil, &wg, opts)
 
 	if len(registry) != 2 {
 		t.Fatalf("expected 2 groups after reload, got %d", len(registry))
@@ -176,7 +177,7 @@ groups:
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			g.Start(ctx, nil, nil)
+			g.Start(ctx, nil, nil, nil)
 		}()
 	}
 	defer func() {
@@ -192,7 +193,7 @@ groups:
 		before = g
 	}
 
-	reloadGroups(ctx, registry, parseGroups(t, dir, yaml), qb, nil, nil, &wg, opts)
+	reloadGroups(ctx, registry, parseGroups(t, dir, yaml), qb, nil, nil, nil, &wg, opts)
 
 	if len(registry) != 1 {
 		t.Fatalf("expected 1 group, got %d", len(registry))
@@ -235,5 +236,36 @@ func TestRedactDSN(t *testing.T) {
 	}
 	if redactDSN("clickhouse://host:9000/db") != "clickhouse://host:9000/db" {
 		t.Error("DSN without credentials should be unchanged")
+	}
+}
+
+// savingStore fails every history write and keeps what Save is given.
+type savingStore struct {
+	mu    sync.Mutex
+	saved []rule.AlertInstance
+}
+
+func (s *savingStore) Save(_ context.Context, instances []rule.AlertInstance) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.saved = append(s.saved, instances...)
+	return nil
+}
+
+func (s *savingStore) LoadActive(context.Context) ([]rule.AlertInstance, error) { return nil, nil }
+
+func (s *savingStore) RecordHistory(context.Context, time.Time, []rule.AlertInstance) error {
+	return errors.New("insert failed")
+}
+
+// EV-42: the state saved at shutdown holds the instances whose resolved
+// rows are still unwritten, so the restart can resolve them.
+func TestPersistAllStateKeepsUnwrittenRetirements(t *testing.T) {
+	store := &savingStore{}
+	retirements := rule.NewRetirements(store)
+	retirements.Resolve(context.Background(), time.Now(), []rule.AlertInstance{{ID: 1, RuleID: 9, State: rule.StateFiring}})
+	persistAllState(context.Background(), map[uint64]*rule.Group{}, store, retirements)
+	if len(store.saved) != 1 || store.saved[0].RuleID != 9 || store.saved[0].State != rule.StateFiring {
+		t.Errorf("saved = %+v, want the unwritten instance as firing", store.saved)
 	}
 }

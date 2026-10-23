@@ -131,8 +131,31 @@ type StateStore interface {
 	// LoadActive loads all Pending/Firing alert instances on startup.
 	LoadActive(ctx context.Context) ([]AlertInstance, error)
 
-	// RecordHistory writes a state transition event to the audit log.
-	RecordHistory(ctx context.Context, instances []AlertInstance) error
+	// RecordHistory writes a state transition event to the audit log, each
+	// row stamped evaluatedAt: the time its group's evaluation started, the
+	// same time that evaluation's log line carries, or the time a rule was
+	// retired for a row that ends its instances.
+	RecordHistory(ctx context.Context, evaluatedAt time.Time, instances []AlertInstance) error
+}
+
+// Evaluation is the outcome of evaluating one rule once, as the evaluation
+// log records it (EvaluationLog). It carries what the rule_eval_* metrics
+// carry, per evaluation, so a reader of ClickHouse can tell a rule that ran
+// and matched nothing from a rule that did not run or whose query failed:
+// neither of the last two writes alert_history rows.
+type Evaluation struct {
+	RuleID      uint64
+	GroupName   string
+	AlertName   string
+	EvaluatedAt time.Time
+	Duration    time.Duration
+	// OK is false when the rule's query failed or its evaluation panicked.
+	OK bool
+	// Samples is the number of rows the rule's query returned, pending and
+	// firing matches alike; zero when OK is false.
+	Samples int
+	// Error is the failure's message when OK is false.
+	Error string
 }
 
 // AlertingRule evaluates a SQL expression and manages alert state transitions.
@@ -500,6 +523,14 @@ func (ar *AlertingRule) GetAlerts() []AlertInstance {
 
 // Name returns the rule name.
 func (ar *AlertingRule) Name() string { return ar.name }
+
+// lastMatches is the number of rows the latest evaluation's query returned:
+// its matches, pending or firing, whatever was sent to notifiers.
+func (ar *AlertingRule) lastMatches() int {
+	ar.mu.Lock()
+	defer ar.mu.Unlock()
+	return ar.lastSamples
+}
 
 // ID returns the rule ID.
 func (ar *AlertingRule) ID() uint64 { return ar.ruleID }

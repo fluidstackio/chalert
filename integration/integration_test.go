@@ -221,7 +221,7 @@ func TestTwoServiceRecoveryScenario(t *testing.T) {
 		DefaultInterval: 5 * time.Second,
 		ExternalLabels:  map[string]string{"env": "integration-test"},
 	})
-	go g.Start(ctx, am, store)
+	go g.Start(ctx, am, store, nil)
 	defer func() {
 		cancel()
 		g.Close()
@@ -423,7 +423,7 @@ func TestExternalLabelsInAlerts(t *testing.T) {
 			"cluster": "test-cluster",
 		},
 	})
-	go g.Start(ctx, am, store)
+	go g.Start(ctx, am, store, nil)
 	defer func() {
 		cancel()
 		g.Close()
@@ -531,7 +531,7 @@ func TestKeepFiringForFlappingData(t *testing.T) {
 	g := rule.NewGroup(groups[0], qb, rule.GroupOptions{
 		DefaultInterval: 5 * time.Second,
 	})
-	go g.Start(ctx, am, store)
+	go g.Start(ctx, am, store, nil)
 	defer func() {
 		cancel()
 		g.Close()

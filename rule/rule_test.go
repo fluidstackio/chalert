@@ -552,3 +552,139 @@ func TestAnnotationTemplates_FullGoTemplate(t *testing.T) {
 		}
 	}
 }
+
+func TestLabelTemplates(t *testing.T) {
+	tests := []struct {
+		name      string
+		rowLabels []datasource.Label
+		cfgLabels map[string]string
+		want      map[string]string
+	}{
+		{
+			name:      "legacy syntax renders from row labels",
+			rowLabels: []datasource.Label{{Name: "team", Value: "platform"}},
+			cfgLabels: map[string]string{"grouping_key": "Foo | {{ $labels.team }}"},
+			want:      map[string]string{"grouping_key": "Foo | platform"},
+		},
+		{
+			name:      "go template syntax renders from row labels",
+			rowLabels: []datasource.Label{{Name: "team", Value: "platform"}},
+			cfgLabels: map[string]string{"grouping_key": "{{ .Labels.team }}"},
+			want:      map[string]string{"grouping_key": "platform"},
+		},
+		{
+			name:      "missing label renders empty",
+			rowLabels: []datasource.Label{{Name: "team", Value: "platform"}},
+			cfgLabels: map[string]string{"grouping_key": "x{{ $labels.nope }}y"},
+			want:      map[string]string{"grouping_key": "xy"},
+		},
+		{
+			name:      "parse error falls back to raw string",
+			rowLabels: []datasource.Label{{Name: "team", Value: "platform"}},
+			cfgLabels: map[string]string{"grouping_key": "{{ $labels.team"},
+			want:      map[string]string{"grouping_key": "{{ $labels.team"},
+		},
+		{
+			name:      "exec error falls back to raw string",
+			rowLabels: []datasource.Label{{Name: "team", Value: "platform"}},
+			cfgLabels: map[string]string{"grouping_key": "{{ .Nope }}"},
+			want:      map[string]string{"grouping_key": "{{ .Nope }}"},
+		},
+		{
+			name:      "non-templated labels pass through verbatim",
+			rowLabels: []datasource.Label{{Name: "team", Value: "platform"}},
+			cfgLabels: map[string]string{"severity": "critical"},
+			want:      map[string]string{"severity": "critical", "team": "platform"},
+		},
+		{
+			name:      "template sees row labels before configured override",
+			rowLabels: []datasource.Label{{Name: "env", Value: "prod"}},
+			cfgLabels: map[string]string{"env": "{{ $labels.env }}-override"},
+			want:      map[string]string{"env": "prod-override", "exported_env": "prod"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			q := &fakeQuerier{
+				results: datasource.Result{
+					Data: []datasource.Metric{
+						{
+							Labels:     tc.rowLabels,
+							Values:     []float64{1},
+							Timestamps: []int64{time.Now().Unix()},
+						},
+					},
+				},
+			}
+			qb := &fakeQuerierBuilder{q: q}
+
+			r := NewAlertingRule(qb, "g", time.Minute, config.Rule{
+				Alert:  "LabelTplTest",
+				Expr:   "SELECT 1 AS value",
+				Labels: tc.cfgLabels,
+				ID:     888,
+			})
+
+			alerts, err := r.Exec(context.Background(), time.Now(), 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(alerts) != 1 {
+				t.Fatalf("expected 1 alert, got %d", len(alerts))
+			}
+			for k, want := range tc.want {
+				if got := alerts[0].Labels[k]; got != want {
+					t.Errorf("label %q: want %q, got %q", k, want, got)
+				}
+			}
+		})
+	}
+}
+
+// TestLabelTemplates_AlertIdentity verifies that label templates are rendered
+// before the alert ID is computed: a templated label set must hash identically
+// to the equivalent literal label set.
+func TestLabelTemplates_AlertIdentity(t *testing.T) {
+	newRule := func(labels map[string]string) *AlertingRule {
+		q := &fakeQuerier{
+			results: datasource.Result{
+				Data: []datasource.Metric{
+					{
+						Labels:     []datasource.Label{{Name: "team", Value: "platform"}},
+						Values:     []float64{1},
+						Timestamps: []int64{time.Now().Unix()},
+					},
+				},
+			},
+		}
+		return NewAlertingRule(&fakeQuerierBuilder{q: q}, "g", time.Minute, config.Rule{
+			Alert:  "IdentityTest",
+			Expr:   "SELECT 1 AS value",
+			Labels: labels,
+			ID:     999,
+		})
+	}
+
+	templated := newRule(map[string]string{"grouping_key": "Foo | {{ $labels.team }}"})
+	literal := newRule(map[string]string{"grouping_key": "Foo | platform"})
+
+	ta, err := templated.Exec(context.Background(), time.Now(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	la, err := literal.Exec(context.Background(), time.Now(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ta) != 1 || len(la) != 1 {
+		t.Fatalf("expected 1 alert each, got %d and %d", len(ta), len(la))
+	}
+
+	if ta[0].ID != la[0].ID {
+		t.Errorf("templated and literal label sets must produce the same alert ID: %d != %d", ta[0].ID, la[0].ID)
+	}
+	if ta[0].ID != hashLabels(ta[0].Labels) {
+		t.Errorf("alert ID must be the hash of the rendered labels: id=%d hash=%d", ta[0].ID, hashLabels(ta[0].Labels))
+	}
+}

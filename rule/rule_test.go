@@ -552,3 +552,64 @@ func TestAnnotationTemplates_FullGoTemplate(t *testing.T) {
 		}
 	}
 }
+
+func TestAlertingRule_HumanizeDuration(t *testing.T) {
+	q := &fakeQuerier{
+		results: datasource.Result{
+			Data: []datasource.Metric{{
+				Labels: []datasource.Label{
+					{Name: "pod_site", Value: "buf101"},
+					{Name: "pod", Value: "pod1"},
+				},
+				Values: []float64{0},
+			}},
+		},
+	}
+	r := NewAlertingRule(&fakeQuerierBuilder{q: q}, "g", time.Minute, config.Rule{
+		Alert: "TPUCCPodDataStale",
+		Expr:  "SELECT 'buf101' AS pod_site, 'pod1' AS pod, 1200 AS value",
+		Annotations: map[string]string{
+			"summary": "{{ $labels.pod_site }} {{ $labels.pod }}: last inlet reading was {{ $value | humanizeDuration }} ago",
+			"native":  "{{ .Labels.pod_site }} {{ .Labels.pod }}: last inlet reading was {{ humanizeDuration .Value }} ago",
+		},
+		ID: 778,
+	})
+
+	tests := []struct {
+		name    string
+		seconds float64
+		want    string
+	}{
+		{name: "minutes", seconds: 1200, want: "20m 0s"},
+		{name: "hours", seconds: 4800, want: "1h 20m 0s"},
+		{name: "days", seconds: 93600, want: "1d 2h 0m 0s"},
+	}
+	var alertID uint64
+	now := time.Now()
+	for i, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			q.results.Data[0].Values[0] = tt.seconds
+			alerts, err := r.Exec(context.Background(), now.Add(time.Duration(i)*time.Minute), 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(alerts) != 1 {
+				t.Fatalf("expected 1 alert, got %d", len(alerts))
+			}
+			want := "buf101 pod1: last inlet reading was " + tt.want + " ago"
+			for _, key := range []string{"summary", "native"} {
+				if got := alerts[0].Annotations[key]; got != want {
+					t.Errorf("annotation %q: want %q, got %q", key, want, got)
+				}
+			}
+			if got := alerts[0].Value; got != tt.seconds {
+				t.Errorf("formatting changed value: want %v seconds, got %v", tt.seconds, got)
+			}
+			if i == 0 {
+				alertID = alerts[0].ID
+			} else if alerts[0].ID != alertID {
+				t.Errorf("duration change created a new alert: want ID %d, got %d", alertID, alerts[0].ID)
+			}
+		})
+	}
+}

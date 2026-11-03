@@ -94,3 +94,54 @@ func TestUpdateAppliesAChangedEvalDelay(t *testing.T) {
 		assertDelay(t, q.waitForQueries(t, q.count()), delay)
 	}
 }
+
+func TestNextEvalTS(t *testing.T) {
+	prev := time.Date(2026, 11, 3, 17, 19, 14, 552_000_000, time.UTC)
+	for _, tc := range []struct {
+		name       string
+		now        time.Time
+		wantTS     time.Time
+		wantMissed int64
+		wantReset  bool
+	}{
+		{"tick lands late", prev.Add(time.Minute + 3*time.Microsecond), prev.Add(time.Minute), 0, false},
+		{"tick lands on time", prev.Add(time.Minute), prev.Add(time.Minute), 0, false},
+		{"evaluation overran two intervals", prev.Add(3*time.Minute + time.Second), prev.Add(3 * time.Minute), 2, false},
+		{"wall clock moved backwards", prev.Add(-time.Second), prev.Add(-time.Second), 0, true},
+		{"less than an interval since prev", prev.Add(59 * time.Second), prev.Add(59 * time.Second), 0, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ts, missed, reset := nextEvalTS(prev, tc.now, time.Minute)
+			if !ts.Equal(tc.wantTS) || missed != tc.wantMissed || reset != tc.wantReset {
+				t.Errorf("nextEvalTS = (%s, %d, %t), want (%s, %d, %t)",
+					ts, missed, reset, tc.wantTS, tc.wantMissed, tc.wantReset)
+			}
+		})
+	}
+}
+
+// A rule still matching once its for duration has passed fires on that
+// evaluation, however late the ticks that woke the evaluations landed. Using
+// ticker times as evaluation timestamps left the gap microseconds short of
+// for whenever the last tick landed less late than the first, holding the
+// alert pending for one more interval.
+func TestNextEvalTSFiresForOnTime(t *testing.T) {
+	ar := newConformanceRule("jitter", 2*time.Minute, 0)
+	ar.querier.(*fakeQuerier).results = datasource.Result{Data: []datasource.Metric{metric("rack", "r1")}}
+
+	start := time.Date(2026, 11, 3, 17, 19, 14, 552_000_000, time.UTC)
+	ts := start
+	for i, lag := range []time.Duration{0, 5 * time.Microsecond, time.Microsecond} {
+		if i > 0 {
+			ts, _, _ = nextEvalTS(ts, start.Add(time.Duration(i)*time.Minute+lag), time.Minute)
+		}
+		if _, err := ar.Exec(context.Background(), ts, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	alerts := ar.GetAlerts()
+	if len(alerts) != 1 || alerts[0].State != StateFiring {
+		t.Fatalf("after evaluations spanning for: got %v, want one firing alert", fmtAlerts(alerts))
+	}
+}

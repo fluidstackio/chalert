@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.6.0](https://github.com/fluidstackio/chalert/compare/v0.5.1...v0.6.0) (2026-11-03)
+
+
+### Features
+
+* log every rule evaluation, and resolve a retired rule's alerts ([#16](https://github.com/fluidstackio/chalert/issues/16)) ([2512cd0](https://github.com/fluidstackio/chalert/commit/2512cd02f10e33962b8a0bb4d0c0dbf2a38fee4e))
+* **rule:** support humanizeDuration in annotations ([#14](https://github.com/fluidstackio/chalert/issues/14)) ([f6558f4](https://github.com/fluidstackio/chalert/commit/f6558f40ef407dd0a8ca8a50656658bba829b44b))
+
+
+### Bug Fixes
+
+* **rule:** apply a changed eval_delay on reload ([#21](https://github.com/fluidstackio/chalert/issues/21)) ([2a6aede](https://github.com/fluidstackio/chalert/commit/2a6aede66d65d1cb0004a21bb6f770e23c754a7a))
+
 ## [0.5.1](https://github.com/fluidstackio/chalert/compare/v0.5.0...v0.5.1) (2026-10-20)
 
 

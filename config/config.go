@@ -73,6 +73,13 @@ type Rule struct {
 	Labels      map[string]string `yaml:"labels,omitempty"`
 	Annotations map[string]string `yaml:"annotations,omitempty"`
 
+	// AnnotationColumns names String columns of the query that feed
+	// annotation templates only (.Columns.<name>, or $columns.<name>). They
+	// are not labels: they are not part of the alert's identity, so a change
+	// in their value updates the annotations of the same alert instead of
+	// resolving it and firing a new one. They are not part of the rule ID.
+	AnnotationColumns []string `yaml:"annotation_columns,omitempty"`
+
 	// KeepFiringFor keeps the alert firing for this duration after the
 	// expression stops matching. Useful for flapping alerts.
 	KeepFiringFor Duration `yaml:"keep_firing_for,omitempty"`
@@ -121,6 +128,25 @@ func (r *Rule) Validate() error {
 	}
 	if r.IsRecording() && r.For.Duration() > 0 {
 		return fmt.Errorf("recording rules cannot have 'for' duration")
+	}
+	if r.IsRecording() && len(r.AnnotationColumns) > 0 {
+		return fmt.Errorf("recording rules cannot have 'annotation_columns'")
+	}
+	seenCols := make(map[string]struct{}, len(r.AnnotationColumns))
+	for _, c := range r.AnnotationColumns {
+		switch c {
+		case "":
+			return fmt.Errorf("'annotation_columns' has an empty name")
+		case "value", "ts", "alertname":
+			return fmt.Errorf("'annotation_columns' cannot name %q: the name is reserved", c)
+		}
+		if _, dup := seenCols[c]; dup {
+			return fmt.Errorf("'annotation_columns' lists %q twice", c)
+		}
+		if _, isLabel := r.Labels[c]; isLabel {
+			return fmt.Errorf("%q is both a configured label and an annotation column", c)
+		}
+		seenCols[c] = struct{}{}
 	}
 
 	// Basic SQL sanity checks. Full validation requires a CH connection.
@@ -242,6 +268,11 @@ func (g *Group) Validate() error {
 		r := &g.Rules[i]
 		if err := r.Validate(); err != nil {
 			return fmt.Errorf("invalid rule %q: %w", r.Name(), err)
+		}
+		for _, c := range r.AnnotationColumns {
+			if _, isLabel := g.Labels[c]; isLabel {
+				return fmt.Errorf("invalid rule %q: %q is both a group label and an annotation column", r.Name(), c)
+			}
 		}
 		if _, ok := uniqueRules[r.ID]; ok {
 			return fmt.Errorf("duplicate rule %q in group", r.Name())

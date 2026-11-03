@@ -404,6 +404,7 @@ func (g *Group) updateWith(ng *Group) []*AlertingRule {
 			old.keepFire = nr.keepFire
 			old.labels = nr.labels
 			old.annTpls = nr.annTpls
+			old.annCols = nr.annCols
 			old.debug = nr.debug
 			old.querier = nr.querier
 			old.mu.Unlock()

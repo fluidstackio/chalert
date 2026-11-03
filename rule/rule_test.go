@@ -552,3 +552,201 @@ func TestAnnotationTemplates_FullGoTemplate(t *testing.T) {
 		}
 	}
 }
+
+// annColsRule builds a rule with one label column (port) and one annotation
+// column (noc), firing at once (for=0).
+func annColsRule(q *fakeQuerier, anns map[string]string) *AlertingRule {
+	return NewAlertingRule(&fakeQuerierBuilder{q: q}, "g", time.Minute, config.Rule{
+		Alert:             "LinkDown",
+		Expr:              "SELECT 'c1' AS port, '555-0100' AS noc, 1 AS value",
+		AnnotationColumns: []string{"noc"},
+		Annotations:       anns,
+		ID:                4242,
+	})
+}
+
+func rowWith(port, noc string) datasource.Result {
+	labels := []datasource.Label{{Name: "port", Value: port}}
+	if noc != "" {
+		labels = append(labels, datasource.Label{Name: "noc", Value: noc})
+	}
+	return datasource.Result{Data: []datasource.Metric{{
+		Labels: labels, Values: []float64{1}, Timestamps: []int64{time.Now().Unix()},
+	}}}
+}
+
+func TestAnnotationColumns_ChangeKeepsIdentity(t *testing.T) {
+	q := &fakeQuerier{results: rowWith("c1", "555-0100")}
+	r := annColsRule(q, map[string]string{"contact": "NOC {{ .Columns.noc }}"})
+	now := time.Now()
+
+	alerts, err := r.Exec(context.Background(), now, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(alerts) != 1 || alerts[0].State != StateFiring {
+		t.Fatalf("expected 1 firing alert, got %+v", alerts)
+	}
+	first := alerts[0]
+	if _, ok := first.Labels["noc"]; ok {
+		t.Errorf("annotation column is a label: %v", first.Labels)
+	}
+	if got := first.Annotations["contact"]; got != "NOC 555-0100" {
+		t.Errorf("contact: got %q", got)
+	}
+
+	// The annotation column changes; the label columns do not.
+	q.results = rowWith("c1", "555-0199")
+	alerts, err = r.Exec(context.Background(), now.Add(2*time.Minute), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(alerts) != 1 {
+		t.Fatalf("expected 1 alert to send, got %d: %+v", len(alerts), alerts)
+	}
+	a := alerts[0]
+	if a.ID != first.ID {
+		t.Errorf("alert ID changed: %d -> %d", first.ID, a.ID)
+	}
+	if a.State != StateFiring || !a.ResolvedAt.IsZero() {
+		t.Errorf("expected still firing and never resolved, got state %s resolved_at %v", a.State, a.ResolvedAt)
+	}
+	if !a.ActiveAt.Equal(first.ActiveAt) {
+		t.Errorf("ActiveAt changed: %v -> %v", first.ActiveAt, a.ActiveAt)
+	}
+	if got := a.Annotations["contact"]; got != "NOC 555-0199" {
+		t.Errorf("contact after change: got %q", got)
+	}
+	if n := len(r.GetAlerts()); n != 1 {
+		t.Errorf("expected 1 instance, got %d", n)
+	}
+}
+
+func TestAnnotationColumns_WithoutTheFieldAColumnChangeIsANewAlert(t *testing.T) {
+	// Today's behaviour, which annotation_columns exists to avoid.
+	q := &fakeQuerier{results: rowWith("c1", "555-0100")}
+	r := NewAlertingRule(&fakeQuerierBuilder{q: q}, "g", time.Minute, config.Rule{
+		Alert: "LinkDown", Expr: "SELECT 'c1' AS port, '555-0100' AS noc, 1 AS value", ID: 4243,
+	})
+	now := time.Now()
+	if _, err := r.Exec(context.Background(), now, 0); err != nil {
+		t.Fatal(err)
+	}
+	q.results = rowWith("c1", "555-0199")
+	alerts, err := r.Exec(context.Background(), now.Add(2*time.Minute), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var resolved, firing int
+	for _, a := range alerts {
+		switch a.State {
+		case StateInactive:
+			resolved++
+		case StateFiring:
+			firing++
+		}
+	}
+	if resolved != 1 || firing != 1 {
+		t.Errorf("expected the old alert resolved and a new one firing, got %d resolved, %d firing", resolved, firing)
+	}
+}
+
+func TestAnnotationColumns_TemplateAccess(t *testing.T) {
+	q := &fakeQuerier{results: rowWith("c1", "555-0100")}
+	r := annColsRule(q, map[string]string{
+		"dot":     "{{ .Columns.noc }}",
+		"legacy":  "{{ $columns.noc }} on {{ $labels.port }}",
+		"if":      "{{ if $columns.noc }}call {{ $columns.noc }}{{ else }}none{{ end }}",
+		"missing": "[{{ .Columns.absent }}]",
+		"label":   "[{{ .Labels.noc }}]",
+	})
+	alerts, err := r.Exec(context.Background(), time.Now(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for key, want := range map[string]string{
+		"dot":     "555-0100",
+		"legacy":  "555-0100 on c1",
+		"if":      "call 555-0100",
+		"missing": "[]",
+		"label":   "[]", // an annotation column is not in .Labels
+	} {
+		if got := alerts[0].Annotations[key]; got != want {
+			t.Errorf("annotation %q: want %q, got %q", key, want, got)
+		}
+	}
+
+	// An empty annotation column: the datasource drops empty strings, so the
+	// template sees it as missing.
+	q.results = rowWith("c1", "")
+	alerts, err = r.Exec(context.Background(), time.Now().Add(2*time.Minute), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := alerts[0].Annotations["if"]; got != "none" {
+		t.Errorf("empty column: got %q", got)
+	}
+}
+
+func TestAnnotationColumns_DuplicateLabelSetIsAnError(t *testing.T) {
+	// Two rows that differ only in an annotation column have the same label
+	// set: the query must stay unique on its label columns.
+	q := &fakeQuerier{results: datasource.Result{Data: []datasource.Metric{
+		{Labels: []datasource.Label{{Name: "port", Value: "c1"}, {Name: "noc", Value: "a"}}, Values: []float64{1}},
+		{Labels: []datasource.Label{{Name: "port", Value: "c1"}, {Name: "noc", Value: "b"}}, Values: []float64{1}},
+	}}}
+	r := annColsRule(q, nil)
+	if _, err := r.Exec(context.Background(), time.Now(), 0); err == nil {
+		t.Fatal("expected a duplicate label set error")
+	}
+}
+
+func TestAnnotationColumns_HotReloadAppliesTheField(t *testing.T) {
+	q := &fakeQuerier{results: rowWith("c1", "555-0100")}
+	cfg := config.Rule{
+		Alert:       "LinkDown",
+		Expr:        "SELECT 'c1' AS port, '555-0100' AS noc, 1 AS value",
+		Annotations: map[string]string{"contact": "NOC {{ .Columns.noc }}"},
+		ID:          4244, // annotation_columns is not part of the rule ID
+	}
+	plain := NewAlertingRule(&fakeQuerierBuilder{q: q}, "g", time.Minute, cfg)
+	cfg.AnnotationColumns = []string{"noc"}
+	withCols := NewAlertingRule(&fakeQuerierBuilder{q: q}, "g", time.Minute, cfg)
+
+	firing := func(t *testing.T, r *AlertingRule, ts time.Time) AlertInstance {
+		t.Helper()
+		if _, err := r.Exec(context.Background(), ts, 0); err != nil {
+			t.Fatal(err)
+		}
+		for _, a := range r.GetAlerts() {
+			if a.State == StateFiring {
+				return a
+			}
+		}
+		t.Fatal("no firing alert")
+		return AlertInstance{}
+	}
+
+	// Reload adds annotation_columns to a running rule.
+	g := &Group{Rules: []*AlertingRule{plain}}
+	now := time.Now()
+	if a := firing(t, plain, now); a.Labels["noc"] != "555-0100" {
+		t.Fatalf("before reload, noc should be a label: %v", a.Labels)
+	}
+	g.updateWith(&Group{Rules: []*AlertingRule{withCols}})
+	a := firing(t, g.Rules[0], now.Add(time.Minute))
+	if _, ok := a.Labels["noc"]; ok {
+		t.Errorf("after adding annotation_columns by reload, noc is still a label: %v", a.Labels)
+	}
+	if got := a.Annotations["contact"]; got != "NOC 555-0100" {
+		t.Errorf("after reload, contact: got %q", got)
+	}
+
+	// Reload removes it again.
+	cfg.AnnotationColumns = nil
+	g.updateWith(&Group{Rules: []*AlertingRule{NewAlertingRule(&fakeQuerierBuilder{q: q}, "g", time.Minute, cfg)}})
+	a = firing(t, g.Rules[0], now.Add(2*time.Minute))
+	if a.Labels["noc"] != "555-0100" {
+		t.Errorf("after removing annotation_columns by reload, noc should be a label again: %v", a.Labels)
+	}
+}

@@ -66,10 +66,69 @@ Alert expressions must return columns matching this shape:
 | Column type | Role | Notes |
 |---|---|---|
 | String, LowCardinality(String) | Dimension labels | Column name becomes label key |
+| String listed in `annotation_columns` | Annotation data | Not a label; read in templates as `.Columns.<name>` |
 | Numeric (Float64, UInt64, etc.) | Alert value | Column named `value` preferred; first numeric otherwise |
 | DateTime, DateTime64 | Timestamp | Optional; defaults to evaluation time |
 
 Each result row produces one alert instance with the string columns as labels.
+The labels are the instance's identity: a row whose labels change is a new
+instance, and the old one resolves. Rows must be unique on their labels.
+
+### Annotation-only Columns
+
+Some columns describe an alert without identifying it: a contact, a link, a
+location. As labels, a change in their value while the alert fires resolves
+the alert and fires a new one, which downstream (for example a ticketing
+receiver) can look like two incidents. List such columns in
+`annotation_columns`:
+
+```yaml
+- alert: LinkDown
+  expr: |
+    SELECT l.device AS device, l.port AS port,
+           any(c.carrier_noc_phone) AS carrier_noc_phone,
+           1 AS value
+    FROM link_state AS l
+    LEFT JOIN circuits AS c USING (device, port)
+    WHERE l.oper_state != 'up'
+    GROUP BY device, port
+  annotation_columns: [carrier_noc_phone]
+  annotations:
+    summary: "{{ .Labels.port }} on {{ .Labels.device }} is down"
+    contact: "{{ if .Columns.carrier_noc_phone }}Carrier NOC: {{ .Columns.carrier_noc_phone }}{{ end }}"
+```
+
+The `LEFT JOIN` keeps ports that have no circuit. The `GROUP BY` with `any()`
+keeps one row per label set: rows must stay unique on their labels, and a
+duplicate fails the whole rule's evaluation, not just one alert.
+
+A listed column is not a label: it is not part of the alert's identity, not
+sent to Alertmanager as a label, and not stored as a dimension. Templates read
+it as `.Columns.<name>`, or `$columns.<name>` (the `$columns` shorthand works
+only with a name after the dot; use `.Columns` with `index` or `range`). An
+absent or empty value reads as an empty string.
+
+When its value changes, the same alert stays firing and its annotations
+update. Alertmanager sends a notification when the set of firing or resolved
+alerts in a group changes, or when `repeat_interval` passes; an annotation
+change alone does not trigger one. Receivers see the new text at the group's
+next notification.
+
+Notes:
+
+- Only columns that would otherwise be labels can be annotation columns:
+  String-like types (String, Nullable(String), FixedString, UUID, Enum, IPv4,
+  IPv6), not numeric or DateTime. Cast others with `toString()`.
+- Names must match the query's column names exactly (ClickHouse names are
+  case-sensitive). A name that matches no column is ignored without an error:
+  the column stays a label and `.Columns.<name>` reads as empty.
+- A listed name cannot be `value`, `ts` or `alertname`, or a label set on the
+  rule or its group. External labels (`-external.label`) are not checked; they
+  are added to the labels and never collide with an annotation column.
+- Recording rules cannot have `annotation_columns`.
+- Adding or removing annotation columns does not change the rule ID, so a
+  reload keeps the rule's state. It does change the label set of its alerts:
+  alerts already firing resolve once and fire again with the new label set.
 
 ### Evaluation Timestamp
 
@@ -86,7 +145,7 @@ HAVING value > 100
 
 ### Annotation Templates
 
-Annotations support Go `text/template` syntax with `.Labels`, `.Value`, and `.Expr` fields. Legacy vmalert-style `$labels` and `$value` variables are also supported.
+Annotations support Go `text/template` syntax with `.Labels`, `.Columns` (see [Annotation-only Columns](#annotation-only-columns)), `.Value`, and `.Expr` fields. Legacy vmalert-style `$labels` and `$value` variables are also supported, and `$columns` the same way.
 
 ```yaml
 annotations:

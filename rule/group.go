@@ -438,10 +438,12 @@ func (g *Group) Retire(ctx context.Context) {
 	g.retireRules(ctx, rules)
 }
 
-// retireRules resolves every firing instance of rules that stopped running.
+// retireRules resolves every firing instance of rules that stopped running,
+// and removes their alerts_active series.
 func (g *Group) retireRules(ctx context.Context, rules []*AlertingRule) {
 	var all []AlertInstance
 	for _, r := range rules {
+		r.forgetActive()
 		all = append(all, r.GetAlerts()...)
 	}
 	if len(all) == 0 || g.retire == nil {

@@ -230,6 +230,8 @@ func (ar *AlertingRule) Exec(ctx context.Context, ts time.Time, limit int) ([]Al
 
 	ar.mu.Lock()
 	defer ar.mu.Unlock()
+	// Runs before the unlock above, on every return.
+	defer ar.recordActive()
 
 	ar.lastEval = start
 	ar.lastDuration = duration

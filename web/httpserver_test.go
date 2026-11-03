@@ -1,10 +1,13 @@
 package web
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
+
+	"github.com/garbett1/chalert/rule"
 )
 
 func newTestServer() (*Server, http.Handler) {
@@ -81,5 +84,34 @@ func TestHandleHealth(t *testing.T) {
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
 	if rec.Code != http.StatusOK {
 		t.Errorf("expected 200, got %d", rec.Code)
+	}
+}
+
+func TestHandleRules(t *testing.T) {
+	get := func(h http.Handler) map[string]any {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/rules", nil))
+		if rec.Code != http.StatusOK || rec.Header().Get("Content-Type") != "application/json" {
+			t.Fatalf("got %d %q, want 200 application/json", rec.Code, rec.Header().Get("Content-Type"))
+		}
+		var body map[string]any
+		if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if body["status"] != "success" {
+			t.Errorf("status = %v, want success", body["status"])
+		}
+		return body["data"].(map[string]any)
+	}
+
+	s, h := newTestServer()
+	if got := get(h)["groups"]; got == nil || len(got.([]any)) != 0 {
+		t.Errorf("before a rules func is registered: groups = %v, want []", got)
+	}
+	s.SetRulesFunc(func() []rule.APIGroup { return []rule.APIGroup{{Name: "g", Rules: []rule.APIRule{}}} })
+	groups := get(h)["groups"].([]any)
+	if len(groups) != 1 || groups[0].(map[string]any)["name"] != "g" {
+		t.Errorf("groups = %v, want one group named g", groups)
 	}
 }

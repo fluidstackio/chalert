@@ -7,6 +7,7 @@
 //   - String, LowCardinality(String), FixedString → Label (dimension)
 //   - Float32, Float64, UInt8-UInt64, Int8-Int64, Decimal → Value (the numeric result)
 //   - DateTime, DateTime64 → Timestamp
+//   - Nullable(T) → as T; a NULL label is left out, a NULL value skips the row
 //
 // The first numeric column found is used as the value. If the query uses an alias
 // like "AS value", that column is preferred. All string columns become labels
@@ -28,6 +29,7 @@ import (
 	"fmt"
 	"log/slog"
 	"reflect"
+	"strings"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2"
@@ -122,7 +124,7 @@ func mapRows(rows driver.Rows, evalTS time.Time) ([]Metric, error) {
 	tsIdx := -1
 
 	for i, ct := range colTypes {
-		typeName := ct.DatabaseTypeName()
+		typeName := baseType(ct.DatabaseTypeName())
 		switch {
 		case isStringType(typeName):
 			roles[i] = roleLabel
@@ -176,7 +178,10 @@ func mapRows(rows driver.Rows, evalTS time.Time) ([]Metric, error) {
 			})
 		}
 
-		// Extract value
+		// Extract value; a NULL is no sample, and skips the row
+		if isNull(scanDest[valueIdx]) {
+			continue
+		}
 		v, err := derefToFloat64(scanDest[valueIdx])
 		if err != nil {
 			return nil, fmt.Errorf("column %q: %w", colNames[valueIdx], err)
@@ -200,6 +205,15 @@ func mapRows(rows driver.Rows, evalTS time.Time) ([]Metric, error) {
 	}
 
 	return metrics, nil
+}
+
+// baseType is a column's type without its Nullable wrapper: a Nullable(T)
+// column is mapped as T.
+func baseType(typeName string) string {
+	if inner, ok := strings.CutPrefix(typeName, "Nullable("); ok {
+		return strings.TrimSuffix(inner, ")")
+	}
+	return typeName
 }
 
 // isStringType returns true for ClickHouse string-family types.
@@ -242,24 +256,36 @@ func isDateTimeType(typeName string) bool {
 	return false
 }
 
-// derefToString converts a scanned value to string.
-func derefToString(v any) string {
-	switch val := v.(type) {
-	case *string:
-		return *val
-	case **string:
-		if *val == nil {
-			return ""
-		}
-		return **val
-	default:
-		return fmt.Sprintf("%v", reflect.Indirect(reflect.ValueOf(v)).Interface())
+// deref follows the pointers of a scan target to its value. It stops at a
+// nil pointer, a Nullable column's NULL.
+func deref(v any) reflect.Value {
+	rv := reflect.ValueOf(v)
+	for rv.Kind() == reflect.Pointer && !rv.IsNil() {
+		rv = rv.Elem()
 	}
+	return rv
+}
+
+// isNull reports whether a scan target holds a Nullable column's NULL.
+func isNull(v any) bool {
+	return deref(v).Kind() == reflect.Pointer
+}
+
+// derefToString converts a scanned value to string; a NULL is "".
+func derefToString(v any) string {
+	rv := deref(v)
+	if rv.Kind() == reflect.Pointer {
+		return ""
+	}
+	if s, ok := rv.Interface().(string); ok {
+		return s
+	}
+	return fmt.Sprintf("%v", rv.Interface())
 }
 
 // derefToFloat64 converts a scanned numeric value to float64.
 func derefToFloat64(v any) (float64, error) {
-	rv := reflect.Indirect(reflect.ValueOf(v))
+	rv := deref(v)
 	switch rv.Kind() {
 	case reflect.Float32, reflect.Float64:
 		return rv.Float(), nil
@@ -274,7 +300,7 @@ func derefToFloat64(v any) (float64, error) {
 
 // derefToTime converts a scanned date/time value to time.Time.
 func derefToTime(v any) (time.Time, bool) {
-	rv := reflect.Indirect(reflect.ValueOf(v))
+	rv := deref(v)
 	if t, ok := rv.Interface().(time.Time); ok {
 		return t, true
 	}

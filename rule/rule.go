@@ -42,6 +42,7 @@ import (
 
 	"github.com/garbett1/chalert/config"
 	"github.com/garbett1/chalert/datasource"
+	"github.com/garbett1/chalert/metrics"
 )
 
 // AlertState represents the state of an alert instance.
@@ -108,7 +109,7 @@ type AlertInstance struct {
 	LastSent time.Time
 
 	// KeepFiringSince tracks when the expression stopped matching but the alert
-	// is kept firing due to keep_firing_for.
+	// is kept firing due to keep_firing_for or hold_while_silent.
 	KeepFiringSince time.Time
 
 	// For is the configured pending duration before firing.
@@ -169,6 +170,7 @@ type AlertingRule struct {
 	expr      string
 	forDur    time.Duration
 	keepFire  time.Duration
+	hold      *config.HoldWhileSilent
 	labels    map[string]string // extra labels from config
 	annTpls   map[string]string // annotation templates
 	groupName string
@@ -197,6 +199,7 @@ func NewAlertingRule(qb datasource.QuerierBuilder, groupName string, groupInterv
 		expr:          cfg.Expr,
 		forDur:        cfg.For.Duration(),
 		keepFire:      cfg.KeepFiringFor.Duration(),
+		hold:          cfg.HoldWhileSilent,
 		labels:        cfg.Labels,
 		annTpls:       cfg.Annotations,
 		groupName:     groupName,
@@ -209,6 +212,11 @@ func NewAlertingRule(qb datasource.QuerierBuilder, groupName string, groupInterv
 		alerts: make(map[uint64]*AlertInstance),
 	}
 }
+
+// HeldAnnotation is the annotation a held instance carries, naming when its
+// hold started. It is an annotation because labels are the instance's
+// identity.
+const HeldAnnotation = "chalert_held"
 
 // resolvedRetention is how long resolved alerts are kept in memory
 // so they can be re-sent to notifiers as resolved.
@@ -304,7 +312,8 @@ func (ar *AlertingRule) Exec(ctx context.Context, ts time.Time, limit int) ([]Al
 	}
 
 	// Process alerts not seen this evaluation
-	var numActive int
+	var numActive, numHeld int
+	var silent *silentDevices
 	for id, a := range ar.alerts {
 		if _, ok := seen[id]; !ok {
 			switch a.State {
@@ -314,6 +323,12 @@ func (ar *AlertingRule) Exec(ctx context.Context, ts time.Time, limit int) ([]Al
 				ar.logDebug(ts, a, "PENDING => DELETED (absent)")
 				continue
 			case StateFiring:
+				if ar.holdWhileSilent(ctx, ts, a, &silent) {
+					ar.logDebug(ts, a, "HOLD_WHILE_SILENT since %v", a.KeepFiringSince)
+					numHeld++
+					numActive++
+					continue
+				}
 				if ar.keepFire > 0 {
 					if a.KeepFiringSince.IsZero() {
 						a.KeepFiringSince = ts
@@ -326,6 +341,7 @@ func (ar *AlertingRule) Exec(ctx context.Context, ts time.Time, limit int) ([]Al
 				}
 				a.State = StateInactive
 				a.ResolvedAt = ts
+				a.Annotations = withoutAnnotation(a.Annotations, HeldAnnotation)
 				ar.logDebug(ts, a, "FIRING => INACTIVE (absent)")
 				continue
 			}
@@ -339,6 +355,10 @@ func (ar *AlertingRule) Exec(ctx context.Context, ts time.Time, limit int) ([]Al
 			a.FiredAt = ts
 			ar.logDebug(ts, a, "PENDING => FIRING after %s", ts.Sub(a.ActiveAt))
 		}
+	}
+
+	if ar.hold != nil {
+		metrics.AlertsHeld.WithLabelValues(ar.groupName, ar.name).Set(float64(numHeld))
 	}
 
 	if limit > 0 && numActive > limit {
@@ -366,6 +386,87 @@ func (ar *AlertingRule) Exec(ctx context.Context, ts time.Time, limit int) ([]Al
 			"resolved", resolved)
 	}
 	return toSend, nil
+}
+
+// silentDevices is one evaluation's answer to a rule's silent query.
+type silentDevices struct {
+	devices map[string]struct{}
+	// failed is true when the query errored: an unknown source is not a
+	// recovery, so every instance with a device is held.
+	failed bool
+}
+
+// holdWhileSilent reports whether the absent firing instance a stays firing
+// because its device's source is silent. silent caches the silent query's
+// answer, so the query runs at most once per evaluation and only when an
+// instance needs it. The hold starts at KeepFiringSince, which the state
+// store persists and a reappearing instance clears.
+func (ar *AlertingRule) holdWhileSilent(ctx context.Context, ts time.Time, a *AlertInstance, silent **silentDevices) bool {
+	h := ar.hold
+	if h == nil {
+		return false
+	}
+	device := a.Labels[h.DeviceLabel]
+	if device == "" {
+		return false
+	}
+	since := a.KeepFiringSince
+	if since.IsZero() {
+		since = ts
+	}
+	if ts.Sub(since) >= h.Max.Duration() {
+		return false
+	}
+	if *silent == nil {
+		*silent = ar.querySilent(ctx, ts)
+	}
+	if _, ok := (*silent).devices[device]; !ok && !(*silent).failed {
+		return false
+	}
+	a.KeepFiringSince = since
+	a.Annotations = withAnnotation(a.Annotations, HeldAnnotation,
+		"source silent since "+since.UTC().Format(time.RFC3339))
+	return true
+}
+
+func (ar *AlertingRule) querySilent(ctx context.Context, ts time.Time) *silentDevices {
+	res, err := ar.querier.Query(ctx, ar.hold.SilentQuery, ts)
+	if err != nil {
+		slog.Warn("chalert silent query failed; holding absent instances",
+			"rule", ar.name, "group", ar.groupName, "error", err)
+		return &silentDevices{failed: true}
+	}
+	devices := make(map[string]struct{}, len(res.Data))
+	for _, m := range res.Data {
+		if d := m.GetLabel(ar.hold.DeviceLabel); d != "" {
+			devices[d] = struct{}{}
+		}
+	}
+	return &silentDevices{devices: devices}
+}
+
+// withAnnotation and withoutAnnotation return a copy, since instances sent to
+// notifiers share the map with the rule's own instance.
+func withAnnotation(ann map[string]string, key, value string) map[string]string {
+	out := make(map[string]string, len(ann)+1)
+	for k, v := range ann {
+		out[k] = v
+	}
+	out[key] = value
+	return out
+}
+
+func withoutAnnotation(ann map[string]string, key string) map[string]string {
+	if _, ok := ann[key]; !ok {
+		return ann
+	}
+	out := make(map[string]string, len(ann))
+	for k, v := range ann {
+		if k != key {
+			out[k] = v
+		}
+	}
+	return out
 }
 
 // alertsToSend returns alerts that need to be sent to notifiers.

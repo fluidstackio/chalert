@@ -95,6 +95,7 @@ ReplacingMergeTree's eventual consistency is acceptable because:
 - [x] ClickHouse querier with column-type-based mapping (datasource/)
 - [x] Alert state machine: Inactive → Pending → Firing (rule/)
 - [x] `for` duration, `keep_firing_for`, `eval_delay`
+- [x] `hold_while_silent`: hold an absent firing instance while its device's source is silent
 - [x] Label merging with `exported_` prefix on conflicts
 - [x] Cardinality limit per rule
 - [x] Concurrent rule evaluation within groups

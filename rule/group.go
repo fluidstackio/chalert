@@ -272,7 +272,8 @@ func (g *Group) execRules(ctx context.Context, rules []*AlertingRule, ts, at tim
 			start := time.Now()
 			alerts, panicked, err := g.execRecovered(ctx, r, ts, limit)
 			duration := time.Since(start)
-			evals = append(evals, g.evaluation(r, at, duration, r.lastMatches(), err))
+			samples := r.lastMatches()
+			evals = append(evals, g.evaluation(r, at, duration, samples, err))
 			if panicked {
 				continue
 			}
@@ -283,7 +284,7 @@ func (g *Group) execRules(ctx context.Context, rules []*AlertingRule, ts, at tim
 					"rule", r.Name(), "group", g.Name, "error", err)
 				continue
 			}
-			metrics.RuleEvalSamples.WithLabelValues(g.Name, r.Name()).Set(float64(len(alerts)))
+			metrics.RuleEvalSamples.WithLabelValues(g.Name, r.Name()).Set(float64(samples))
 			all = append(all, alerts...)
 		}
 		return all, evals
@@ -347,7 +348,7 @@ func (g *Group) execRules(ctx context.Context, rules []*AlertingRule, ts, at tim
 				"rule", res.r.Name(), "group", g.Name, "error", res.err)
 			continue
 		}
-		metrics.RuleEvalSamples.WithLabelValues(g.Name, res.r.Name()).Set(float64(len(res.alerts)))
+		metrics.RuleEvalSamples.WithLabelValues(g.Name, res.r.Name()).Set(float64(res.samples))
 		all = append(all, res.alerts...)
 	}
 	return all, evals

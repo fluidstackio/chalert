@@ -47,6 +47,8 @@ spec:
             {{- end }}
             {{- if .Values.config.clickhouse.readDSN }}
             - -clickhouse.read-dsn={{ .Values.config.clickhouse.readDSN }}
+            {{- else if and .Values.config.existingSecret .Values.config.existingSecretReadDSNKey }}
+            - -clickhouse.read-dsn=$(CLICKHOUSE_READ_DSN)
             {{- end }}
             - -clickhouse.database={{ .Values.config.clickhouse.database }}
             - -clickhouse.maxQueryTime={{ .Values.config.clickhouse.maxQueryTime }}
@@ -88,6 +90,13 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.config.existingSecret }}
                   key: dsn
+            {{- if .Values.config.existingSecretReadDSNKey }}
+            - name: CLICKHOUSE_READ_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.config.existingSecret }}
+                  key: {{ .Values.config.existingSecretReadDSNKey }}
+            {{- end }}
           {{- end }}
           ports:
             - name: http

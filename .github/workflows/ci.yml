@@ -13,8 +13,8 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v4.4.0
+      - uses: actions/setup-go@v5.6.0
         with:
           go-version-file: go.mod
       - name: Vet
@@ -27,8 +27,8 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v4.4.0
+      - uses: actions/setup-go@v5.6.0
         with:
           go-version-file: go.mod
       - name: Install golangci-lint
@@ -39,7 +39,7 @@ jobs:
   helm:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: azure/setup-helm@v4
+      - uses: actions/checkout@v4.4.0
+      - uses: azure/setup-helm@v4.3.1
       - name: Lint chart
         run: helm lint charts/chalert

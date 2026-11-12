@@ -170,7 +170,7 @@ type AlertingRule struct {
 	forDur    time.Duration
 	keepFire  time.Duration
 	labels    map[string]string // extra labels from config
-	annTpls   map[string]string // annotation templates
+	annTpls   map[string]annotationTemplate
 	groupName string
 	debug     bool
 
@@ -198,7 +198,7 @@ func NewAlertingRule(qb datasource.QuerierBuilder, groupName string, groupInterv
 		forDur:        cfg.For.Duration(),
 		keepFire:      cfg.KeepFiringFor.Duration(),
 		labels:        cfg.Labels,
-		annTpls:       cfg.Annotations,
+		annTpls:       parseAnnotations(cfg.Alert, cfg.Annotations),
 		groupName:     groupName,
 		groupInterval: groupInterval,
 		debug:         debug,
@@ -453,29 +453,47 @@ func (ar *AlertingRule) renderAnnotations(m datasource.Metric, _ *AlertInstance)
 	}
 
 	out := make(map[string]string, len(ar.annTpls))
-	for k, tpl := range ar.annTpls {
-		// Rewrite legacy {{ $labels.X }} and {{ $value }} to Go template syntax.
-		normalized := normalizeLegacyTemplate(tpl)
-
-		t, err := template.New(k).Funcs(template.FuncMap{
-			"humanizeDuration": templates.HumanizeDuration,
-		}).Option("missingkey=zero").Parse(normalized)
-		if err != nil {
-			// Fall back to raw template on parse error.
-			slog.Warn("chalert annotation template parse error",
-				"rule", ar.name, "key", k, "error", err)
-			out[k] = tpl
+	for k, at := range ar.annTpls {
+		if at.tpl == nil {
+			out[k] = at.raw
 			continue
 		}
-
 		var buf bytes.Buffer
-		if err := t.Execute(&buf, data); err != nil {
+		if err := at.tpl.Execute(&buf, data); err != nil {
 			slog.Warn("chalert annotation template exec error",
 				"rule", ar.name, "key", k, "error", err)
-			out[k] = tpl
+			out[k] = at.raw
 			continue
 		}
 		out[k] = buf.String()
+	}
+	return out
+}
+
+// annotationTemplate is one annotation as configured and as parsed. A rule
+// parses its annotations once, when it is built, because rendering runs for
+// every alert on every evaluation. tpl is nil when raw does not parse, and
+// the annotation then renders as raw.
+type annotationTemplate struct {
+	raw string
+	tpl *template.Template
+}
+
+func parseAnnotations(rule string, raw map[string]string) map[string]annotationTemplate {
+	if len(raw) == 0 {
+		return nil
+	}
+	out := make(map[string]annotationTemplate, len(raw))
+	for k, tpl := range raw {
+		t, err := template.New(k).Funcs(template.FuncMap{
+			"humanizeDuration": templates.HumanizeDuration,
+		}).Option("missingkey=zero").Parse(normalizeLegacyTemplate(tpl))
+		if err != nil {
+			slog.Warn("chalert annotation template parse error",
+				"rule", rule, "key", k, "error", err)
+			t = nil
+		}
+		out[k] = annotationTemplate{raw: tpl, tpl: t}
 	}
 	return out
 }

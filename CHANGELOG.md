@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.1](https://github.com/fluidstackio/chalert/compare/v0.6.0...v0.6.1) (2026-11-12)
+
+
+### Performance Improvements
+
+* **rule:** parse annotation templates once per rule ([#30](https://github.com/fluidstackio/chalert/issues/30)) ([c970340](https://github.com/fluidstackio/chalert/commit/c970340de677181a47d5b3b9673e76456e799935))
+
 ## [0.6.0](https://github.com/fluidstackio/chalert/compare/v0.5.1...v0.6.0) (2026-11-03)
 
 

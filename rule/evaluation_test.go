@@ -9,6 +9,9 @@ import (
 
 	"github.com/garbett1/chalert/config"
 	"github.com/garbett1/chalert/datasource"
+	"github.com/garbett1/chalert/metrics"
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 )
 
 // exprQuerier answers by expression: a result, an error, or a panic.
@@ -114,8 +117,19 @@ func TestExecRulesRecordsAPanicAsFailed(t *testing.T) {
 	}
 }
 
-// Samples counts the query's matches, not the alerts sent to notifiers: two
-// rows still pending under a `for` window send nothing and are two samples.
+// gaugeValue reads a gauge's current value.
+func gaugeValue(t *testing.T, g prometheus.Gauge) float64 {
+	t.Helper()
+	var m dto.Metric
+	if err := g.Write(&m); err != nil {
+		t.Fatal(err)
+	}
+	return m.GetGauge().GetValue()
+}
+
+// Samples counts the query's matches, not the alerts sent to notifiers, in
+// the evaluation log and the rule_eval_samples gauge alike: two rows still
+// pending under a `for` window send nothing and are two samples.
 func TestExecRulesCountsPendingMatches(t *testing.T) {
 	for name, concurrency := range map[string]int{"sequential": 1, "concurrent": 2} {
 		t.Run(name, func(t *testing.T) {
@@ -126,6 +140,9 @@ func TestExecRulesCountsPendingMatches(t *testing.T) {
 			}
 			if e := byRule(evals)[1]; !e.OK || e.Samples != 2 {
 				t.Errorf("pending rule: %+v, want ok with 2 samples", e)
+			}
+			if got := gaugeValue(t, metrics.RuleEvalSamples.WithLabelValues("g", "Pending")); got != 2 {
+				t.Errorf("rule_eval_samples = %v, want 2", got)
 			}
 		})
 	}

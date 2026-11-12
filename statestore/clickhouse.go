@@ -28,6 +28,7 @@ package statestore
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -78,13 +79,65 @@ TTL event_time + INTERVAL 90 DAY
 
 // Store implements rule.StateStore backed by ClickHouse.
 type Store struct {
-	conn     driver.Conn
-	database string
+	conn        driver.Conn
+	database    string
+	historyExpr HistoryExpr
+}
+
+// HistoryExpr is what each alert_history row carries in its expr column.
+// alert_state always carries the full query, because restart recovery reads
+// it back.
+type HistoryExpr string
+
+const (
+	// HistoryExprFull writes the rule's query in every row.
+	HistoryExprFull HistoryExpr = "full"
+	// HistoryExprNone writes an empty expr. rule_id still names the rule,
+	// but a rule's ID ignores the literals in its query, so a row no longer
+	// shows which threshold the alert fired against.
+	HistoryExprNone HistoryExpr = "none"
+)
+
+// ErrUnknownHistoryExpr is returned by ParseHistoryExpr for a value that
+// names no HistoryExpr.
+var ErrUnknownHistoryExpr = errors.New("unknown history expr")
+
+// ParseHistoryExpr returns the HistoryExpr that s names.
+func ParseHistoryExpr(s string) (HistoryExpr, error) {
+	switch h := HistoryExpr(s); h {
+	case HistoryExprFull, HistoryExprNone:
+		return h, nil
+	}
+	return "", fmt.Errorf("%w %q: want %q or %q", ErrUnknownHistoryExpr, s, HistoryExprFull, HistoryExprNone)
+}
+
+// Option configures a Store.
+type Option func(*Store)
+
+// WithHistoryExpr sets what alert_history rows carry in expr. The default
+// is HistoryExprFull.
+func WithHistoryExpr(h HistoryExpr) Option {
+	return func(s *Store) { s.historyExpr = h }
 }
 
 // New creates a new ClickHouse state store.
-func New(conn driver.Conn, database string) *Store {
-	return &Store{conn: conn, database: database}
+func New(conn driver.Conn, database string, opts ...Option) *Store {
+	s := &Store{conn: conn, database: database, historyExpr: HistoryExprFull}
+	for _, o := range opts {
+		o(s)
+	}
+	return s
+}
+
+// historyExprValue is what an alert_history row carries for a rule's query.
+// Every HistoryExpr but HistoryExprNone writes the query.
+func (s *Store) historyExprValue(expr string) string {
+	switch s.historyExpr {
+	case HistoryExprNone:
+		return ""
+	default:
+		return expr
+	}
 }
 
 // EnsureTables creates the alert_state and alert_history tables if they don't exist.
@@ -233,7 +286,7 @@ func (s *Store) RecordHistory(ctx context.Context, evaluatedAt time.Time, instan
 			stateToEnum(inst.State),
 			inst.Labels,
 			inst.Value,
-			inst.Expr,
+			s.historyExprValue(inst.Expr),
 			inst.Annotations,
 			evaluatedAt,
 			now, // event_time: when the row was written

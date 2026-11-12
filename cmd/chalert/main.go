@@ -81,6 +81,7 @@ var (
 	dryRun              = flag.Bool("dryRun", false, "Parse and validate rules without starting evaluation.")
 	httpAddr            = flag.String("httpListenAddr", ":8880", "Address for the HTTP API and UI.")
 	shutdownTimeout     = flag.Duration("shutdownTimeout", 30*time.Second, "Maximum time to wait for graceful shutdown.")
+	historyExprFlag     = flag.String("history.expr", string(statestore.HistoryExprFull), `What each alert_history row carries in expr: "full" (the rule's query) or "none" (empty).`)
 	externalLabelsRaw   arrayString
 
 	// version is set by -ldflags at build time.
@@ -104,6 +105,11 @@ func main() {
 	}
 	if *clickhouseDSN == "" && !*dryRun {
 		fatalf("'-clickhouse.dsn' flag is required")
+	}
+
+	historyExpr, err := statestore.ParseHistoryExpr(*historyExprFlag)
+	if err != nil {
+		fatalf("invalid -history.expr: %s", err)
 	}
 
 	// Apply resend delay
@@ -177,7 +183,7 @@ func main() {
 	defer func() { _ = ch.Close() }()
 
 	// Ensure state tables exist
-	store := statestore.New(ch.WriteConn(), *clickhouseDB)
+	store := statestore.New(ch.WriteConn(), *clickhouseDB, statestore.WithHistoryExpr(historyExpr))
 	ctx := context.Background()
 	if err := store.EnsureTables(ctx); err != nil {
 		fatalf("failed to create state tables: %s", err)

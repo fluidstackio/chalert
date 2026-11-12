@@ -217,6 +217,7 @@ chalert exposes Prometheus metrics on the HTTP server (`-httpListenAddr`, defaul
 | `/metrics` | Prometheus metrics |
 | `/version` | Build version JSON |
 | `/-/reload` | POST triggers a rule reload |
+| `/api/v1/rules` | Rule groups, rules and active alerts in the Prometheus format Grafana reads |
 
 Key metrics:
 

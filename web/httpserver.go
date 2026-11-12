@@ -9,6 +9,8 @@ import (
 	"sync/atomic"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+
+	"github.com/garbett1/chalert/rule"
 )
 
 // Server is the chalert HTTP server for health, readiness, metrics, and version info.
@@ -16,6 +18,7 @@ type Server struct {
 	srv      *http.Server
 	ready    atomic.Bool
 	reloadFn atomic.Pointer[func()]
+	rulesFn  atomic.Pointer[func() []rule.APIGroup]
 }
 
 // New creates a new HTTP server on the given address.
@@ -25,6 +28,7 @@ func New(addr, version string) *Server {
 	mux.HandleFunc("GET /health", s.handleHealth)
 	mux.HandleFunc("GET /ready", s.handleReady)
 	mux.HandleFunc("POST /-/reload", s.handleReload)
+	mux.HandleFunc("GET /api/v1/rules", s.handleRules)
 	mux.Handle("GET /metrics", promhttp.Handler())
 	mux.HandleFunc("GET /version", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -46,6 +50,22 @@ func (s *Server) SetReady(ready bool) {
 // SetReloadFunc registers the non-blocking reload trigger for POST /-/reload (503 until set).
 func (s *Server) SetReloadFunc(fn func()) {
 	s.reloadFn.Store(&fn)
+}
+
+// SetRulesFunc registers the source of GET /api/v1/rules (no groups until set).
+func (s *Server) SetRulesFunc(fn func() []rule.APIGroup) {
+	s.rulesFn.Store(&fn)
+}
+
+// handleRules serves the rule groups in the Prometheus /api/v1/rules format,
+// which Grafana reads.
+func (s *Server) handleRules(w http.ResponseWriter, _ *http.Request) {
+	groups := []rule.APIGroup{}
+	if fn := s.rulesFn.Load(); fn != nil {
+		groups = (*fn)()
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"status": "success", "data": map[string]any{"groups": groups}})
 }
 
 func (s *Server) handleReload(w http.ResponseWriter, _ *http.Request) {

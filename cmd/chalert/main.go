@@ -31,11 +31,14 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net/http"
 	"os"
 	"os/signal"
+	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -253,6 +256,16 @@ func main() {
 		}()
 	}
 
+	// GET /api/v1/rules reads the running groups off the main goroutine,
+	// so it gets a snapshot, published again after each reload.
+	var running atomic.Pointer[[]*rule.Group]
+	publishGroups := func() {
+		gs := slices.Collect(maps.Values(ruleGroups))
+		running.Store(&gs)
+	}
+	publishGroups()
+	httpSrv.SetRulesFunc(func() []rule.APIGroup { return rule.APIGroups(*running.Load()) })
+
 	httpSrv.SetReady(true)
 	slog.Info("chalert started",
 		"version", version,
@@ -293,6 +306,7 @@ func main() {
 			return
 		}
 		reloadGroups(ctx, ruleGroups, newGroups, qb, notify, store, evalLog, &wg, groupOpts)
+		publishGroups()
 		lastFP = fp
 		metrics.ConfigReloads.WithLabelValues("success").Inc()
 		metrics.ConfigLastReloadSuccess.SetToCurrentTime()

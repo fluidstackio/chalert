@@ -184,7 +184,7 @@ See `examples/rmv_preaggregation.yaml` for complete examples.
 - [ ] Replay/backfill mode
 - [ ] Per-group ClickHouse connection overrides
 - [ ] Metrics exposition (Prometheus /metrics endpoint)
-- [ ] Grafana-compatible /api/v1/rules endpoint
+- [x] Grafana-compatible /api/v1/rules endpoint
 
 ## Edge Cases and Mitigations
 

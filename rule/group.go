@@ -238,7 +238,8 @@ func (g *Group) Start(ctx context.Context, notifier Notifier, store StateStore, 
 	}
 
 	// First evaluation immediately
-	eval(ctx, time.Now())
+	evalTS := time.Now()
+	eval(ctx, evalTS)
 
 	ticker := time.NewTicker(g.Interval)
 	defer ticker.Stop()
@@ -255,10 +256,38 @@ func (g *Group) Start(ctx context.Context, notifier Notifier, store StateStore, 
 			g.mu.Unlock()
 			slog.Info("chalert group updated", "group", g.Name)
 			g.retireRules(ctx, dropped)
-		case ts := <-ticker.C:
-			eval(ctx, ts)
+		case <-ticker.C:
+			var missed int64
+			var reset bool
+			evalTS, missed, reset = nextEvalTS(evalTS, time.Now(), g.Interval)
+			if missed > 0 {
+				metrics.GroupIterationsMissed.WithLabelValues(g.Name).Add(float64(missed))
+			}
+			if reset {
+				metrics.GroupIterationResets.WithLabelValues(g.Name).Inc()
+			}
+			eval(ctx, evalTS)
 		}
 	}
+}
+
+// nextEvalTS advances the previous evaluation timestamp by whole intervals,
+// as vmalert and Prometheus do, rather than using the ticker's time. Ticks
+// land microseconds early or late, and a pending alert compares the gap
+// between two evaluation timestamps against its for duration, so a tick
+// that lands early holds the alert pending for an extra interval.
+//
+// Intervals the loop slept through are skipped and counted as missed. When
+// the wall clock has moved backwards, or an evaluation's delays left less
+// than an interval since prev, it restarts from now.
+func nextEvalTS(prev, now time.Time, interval time.Duration) (ts time.Time, missed int64, reset bool) {
+	// Round(0) strips the monotonic reading so a wall clock adjustment is
+	// seen; see VictoriaMetrics/VictoriaMetrics#8790.
+	steps := int64(now.Round(0).Sub(prev.Round(0))/interval) - 1
+	if steps < 0 {
+		return now, 0, true
+	}
+	return prev.Add(time.Duration(steps+1) * interval), steps, false
 }
 
 // execRules evaluates rules with the given concurrency. It returns the

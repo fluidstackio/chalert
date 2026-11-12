@@ -69,6 +69,22 @@ var (
 		Help:      "Resolved history rows of retired rules not yet written.",
 	})
 
+	// GroupIterationsMissed counts evaluation intervals a group skipped
+	// because the previous evaluation overran them.
+	GroupIterationsMissed = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "chalert",
+		Name:      "group_iterations_missed_total",
+		Help:      "Total number of evaluation intervals a group skipped.",
+	}, []string{"group"})
+
+	// GroupIterationResets counts evaluations whose timestamp restarted from
+	// the current time instead of advancing by the group interval.
+	GroupIterationResets = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "chalert",
+		Name:      "group_iteration_resets_total",
+		Help:      "Total number of evaluation timestamps reset to the current time.",
+	}, []string{"group"})
+
 	// ConfigLastReloadSuccessful reports whether the last config reload attempt succeeded (1) or failed (0).
 	ConfigLastReloadSuccessful = prometheus.NewGauge(prometheus.GaugeOpts{
 		Namespace: "chalert",
@@ -87,6 +103,8 @@ func init() {
 		NotifierErrors,
 		ConfigReloads,
 		RetiredRowsPending,
+		GroupIterationsMissed,
+		GroupIterationResets,
 		ConfigLastReloadSuccess,
 		ConfigLastReloadSuccessful,
 	)

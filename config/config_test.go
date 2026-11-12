@@ -158,6 +158,102 @@ groups:
 `,
 		},
 		{
+			name: "hold_while_silent without device_label",
+			yaml: `
+groups:
+  - name: g
+    rules:
+      - alert: foo
+        expr: SELECT 1 AS value
+        hold_while_silent:
+          silent_query: SELECT device, 1 AS value FROM silence
+          max: 6h
+`,
+		},
+		{
+			name: "hold_while_silent without silent_query",
+			yaml: `
+groups:
+  - name: g
+    rules:
+      - alert: foo
+        expr: SELECT 1 AS value
+        hold_while_silent:
+          device_label: device
+          max: 6h
+`,
+		},
+		{
+			name: "hold_while_silent without max",
+			yaml: `
+groups:
+  - name: g
+    rules:
+      - alert: foo
+        expr: SELECT 1 AS value
+        hold_while_silent:
+          device_label: device
+          silent_query: SELECT device, 1 AS value FROM silence
+`,
+		},
+		{
+			name: "hold_while_silent with negative max",
+			yaml: `
+groups:
+  - name: g
+    rules:
+      - alert: foo
+        expr: SELECT 1 AS value
+        hold_while_silent:
+          device_label: device
+          silent_query: SELECT device, 1 AS value FROM silence
+          max: -1h
+`,
+		},
+		{
+			name: "hold_while_silent with non-SELECT silent_query",
+			yaml: `
+groups:
+  - name: g
+    rules:
+      - alert: foo
+        expr: SELECT 1 AS value
+        hold_while_silent:
+          device_label: device
+          silent_query: DROP TABLE silence
+          max: 6h
+`,
+		},
+		{
+			name: "hold_while_silent with keep_firing_for",
+			yaml: `
+groups:
+  - name: g
+    rules:
+      - alert: foo
+        expr: SELECT 1 AS value
+        keep_firing_for: 5m
+        hold_while_silent:
+          device_label: device
+          silent_query: SELECT device, 1 AS value FROM silence
+          max: 6h
+`,
+		},
+		{
+			name: "recording rule with hold_while_silent",
+			yaml: `
+groups:
+  - name: g
+    rules:
+      - record: foo
+        expr: SELECT 1 AS value
+        hold_while_silent:
+          device_label: device
+          silent_query: SELECT device, 1 AS value FROM silence
+          max: 6h
+`,
+		},
+		{
 			name: "duplicate rules",
 			yaml: `
 groups:
@@ -184,6 +280,44 @@ groups:
 			}
 			t.Logf("got expected error: %s", err)
 		})
+	}
+}
+
+func TestParseHoldWhileSilent(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "rules.yaml")
+	yaml := `
+groups:
+  - name: g
+    rules:
+      - alert: LinkDown
+        expr: SELECT device, 1 AS value FROM faults
+        hold_while_silent:
+          device_label: device
+          silent_query: |
+            SELECT device, 1 AS value FROM silence
+          max: 6h
+`
+	if err := os.WriteFile(path, []byte(yaml), 0644); err != nil {
+		t.Fatal(err)
+	}
+	groups, err := Parse([]string{path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := groups[0].Rules[0]
+	h := r.HoldWhileSilent
+	if h == nil {
+		t.Fatal("expected hold_while_silent to parse")
+	}
+	if h.DeviceLabel != "device" || h.Max.Duration() != 6*time.Hour || !strings.HasPrefix(h.SilentQuery, "SELECT device") {
+		t.Errorf("unexpected hold_while_silent: %+v", *h)
+	}
+
+	without := r
+	without.HoldWhileSilent = nil
+	if r.ID != HashRule(without) {
+		t.Error("hold_while_silent must not change the rule ID")
 	}
 }
 

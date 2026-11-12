@@ -77,6 +77,12 @@ type Rule struct {
 	// expression stops matching. Useful for flapping alerts.
 	KeepFiringFor Duration `yaml:"keep_firing_for,omitempty"`
 
+	// HoldWhileSilent keeps a firing instance firing while it is absent and
+	// its device's source is silent, so lost data does not read as recovery.
+	// It is left out of the rule's identity hash, so adopting it keeps the
+	// rule's ID and its alert state.
+	HoldWhileSilent *HoldWhileSilent `yaml:"hold_while_silent,omitempty"`
+
 	// Recording rule fields
 	Record string `yaml:"record,omitempty"`
 
@@ -85,6 +91,45 @@ type Rule struct {
 
 	// ID is computed during parsing.
 	ID uint64 `yaml:"-"`
+}
+
+// HoldWhileSilent names how an alerting rule finds whether an absent firing
+// instance's device has a silent source.
+type HoldWhileSilent struct {
+	// DeviceLabel is the instance label naming its device, and the column of
+	// SilentQuery's rows naming a silent device.
+	DeviceLabel string `yaml:"device_label"`
+
+	// SilentQuery returns one row per device whose source is silent at the
+	// evaluation time. It follows the same query contract as expr.
+	SilentQuery string `yaml:"silent_query"`
+
+	// Max bounds how long one instance is held, from the evaluation where it
+	// first went absent.
+	Max Duration `yaml:"max"`
+}
+
+// Validate checks the block for configuration errors.
+func (h *HoldWhileSilent) Validate() error {
+	if h.DeviceLabel == "" {
+		return fmt.Errorf("'hold_while_silent.device_label' cannot be empty")
+	}
+	if h.SilentQuery == "" {
+		return fmt.Errorf("'hold_while_silent.silent_query' cannot be empty")
+	}
+	if h.Max.Duration() <= 0 {
+		return fmt.Errorf("'hold_while_silent.max' must be > 0")
+	}
+	if !isSelect(h.SilentQuery) {
+		return fmt.Errorf("'hold_while_silent.silent_query' must be a SELECT or WITH statement, got: %.40s", h.SilentQuery)
+	}
+	return nil
+}
+
+// isSelect is the basic SQL sanity check every query gets at parse time.
+func isSelect(expr string) bool {
+	upper := strings.ToUpper(strings.TrimSpace(expr))
+	return strings.HasPrefix(upper, "SELECT") || strings.HasPrefix(upper, "WITH")
 }
 
 // Name returns the rule name based on type.
@@ -123,9 +168,21 @@ func (r *Rule) Validate() error {
 		return fmt.Errorf("recording rules cannot have 'for' duration")
 	}
 
+	if r.HoldWhileSilent != nil {
+		if r.IsRecording() {
+			return fmt.Errorf("recording rules cannot have 'hold_while_silent'")
+		}
+		// Both measure their hold from the instance's KeepFiringSince.
+		if r.KeepFiringFor.Duration() > 0 {
+			return fmt.Errorf("'hold_while_silent' and 'keep_firing_for' are mutually exclusive")
+		}
+		if err := r.HoldWhileSilent.Validate(); err != nil {
+			return err
+		}
+	}
+
 	// Basic SQL sanity checks. Full validation requires a CH connection.
-	exprUpper := strings.ToUpper(strings.TrimSpace(r.Expr))
-	if !strings.HasPrefix(exprUpper, "SELECT") && !strings.HasPrefix(exprUpper, "WITH") {
+	if !isSelect(r.Expr) {
 		return fmt.Errorf("'expr' must be a SELECT or WITH statement, got: %.40s", r.Expr)
 	}
 

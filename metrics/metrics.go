@@ -33,6 +33,14 @@ var (
 		Help:      "Number of active alert instances per rule.",
 	}, []string{"group", "rule", "state"})
 
+	// AlertsHeld tracks firing instances kept firing by hold_while_silent
+	// while absent, per rule that sets it.
+	AlertsHeld = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: "chalert",
+		Name:      "alerts_held",
+		Help:      "Number of absent firing alert instances held because their source is silent.",
+	}, []string{"group", "rule"})
+
 	// NotifierSends counts alert notification sends.
 	NotifierSends = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "chalert",
@@ -83,6 +91,7 @@ func init() {
 		RuleEvalErrors,
 		RuleEvalSamples,
 		AlertsActive,
+		AlertsHeld,
 		NotifierSends,
 		NotifierErrors,
 		ConfigReloads,

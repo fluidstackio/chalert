@@ -189,6 +189,7 @@ A separate read connection can be configured with `-clickhouse.read-dsn` to isol
 | `-notifier.url` | | Alertmanager URL(s), comma-separated |
 | `-evaluationInterval` | `1m` | Default group evaluation interval |
 | `-rule.defaultLimit` | `10000` | Default max alert instances per rule |
+| `-history.expr` | `full` | What `alert_history` rows carry in `expr`: `full` (the rule's query) or `none` (empty, which saves memory at many firing alerts) |
 | `-rule.configCheckInterval` | `0` | Interval for re-reading rule files and hot-reloading on changes (0 = disabled) |
 | `-external.url` | | Base URL for alert source links |
 | `-external.label` | | External labels (`Name=value`, repeatable) |

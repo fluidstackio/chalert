@@ -64,6 +64,8 @@ config:
   ruleConfigCheckInterval: "1m"
   # -- Default max alert instances per rule
   defaultLimit: 10000
+  # -- What alert_history rows carry in expr: "full" (the rule's query) or "none" ("" means chalert's default, full)
+  historyExpr: ""
   # -- External labels applied to all alerts
   externalLabels: {}
   #   env: production

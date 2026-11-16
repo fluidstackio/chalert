@@ -4,9 +4,9 @@ description: ClickHouse-native alerting engine following vmalert's architecture
 type: application
 version: 0.3.0
 appVersion: "0.3.0"
-home: https://github.com/garbett1/chalert
+home: https://github.com/fluidstackio/chalert
 sources:
-  - https://github.com/garbett1/chalert
+  - https://github.com/fluidstackio/chalert
 keywords:
   - alerting
   - clickhouse

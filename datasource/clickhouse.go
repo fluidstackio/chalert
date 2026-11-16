@@ -105,97 +105,75 @@ func (q *ClickHouseQuerier) QueryRange(ctx context.Context, expr string, _, end 
 //   - String types → labels
 //   - Numeric types → value candidates (first one wins, or column named "value")
 //   - DateTime types → timestamp candidates (first one wins, or column named "ts")
-func mapRows(rows driver.Rows, evalTS time.Time) ([]Metric, error) {
-	colTypes := rows.ColumnTypes()
-	colNames := rows.Columns()
+type colRole int
 
-	if len(colTypes) == 0 {
-		return nil, nil
-	}
+const (
+	roleLabel colRole = iota
+	roleValue
+	roleTimestamp
+)
 
-	// Classify columns by type
-	type colRole int
-	const (
-		roleLabel colRole = iota
-		roleValue
-		roleTimestamp
-	)
+// columnLayout records which column plays which part in a metric.
+type columnLayout struct {
+	names    []string
+	roles    []colRole
+	valueIdx int
+	tsIdx    int
+}
 
-	roles := make([]colRole, len(colTypes))
-	valueIdx := -1
-	tsIdx := -1
-
+func classifyColumns(colTypes []driver.ColumnType, colNames []string) (columnLayout, error) {
+	l := columnLayout{names: colNames, roles: make([]colRole, len(colTypes)), valueIdx: -1, tsIdx: -1}
 	for i, ct := range colTypes {
 		typeName := ct.DatabaseTypeName()
 		switch {
 		case isStringType(typeName):
-			roles[i] = roleLabel
+			l.roles[i] = roleLabel
 		case isNumericType(typeName):
-			roles[i] = roleValue
+			l.roles[i] = roleValue
 			// Prefer column explicitly named "value"
-			if colNames[i] == "value" || valueIdx == -1 {
-				valueIdx = i
+			if colNames[i] == "value" || l.valueIdx == -1 {
+				l.valueIdx = i
 			}
 		case isDateTimeType(typeName):
-			roles[i] = roleTimestamp
-			if colNames[i] == "ts" || tsIdx == -1 {
-				tsIdx = i
+			l.roles[i] = roleTimestamp
+			if colNames[i] == "ts" || l.tsIdx == -1 {
+				l.tsIdx = i
 			}
 		default:
 			// Treat unknown types as labels (will be converted to string)
-			roles[i] = roleLabel
+			l.roles[i] = roleLabel
 		}
 	}
+	if l.valueIdx == -1 {
+		return l, fmt.Errorf("query must return at least one numeric column for the value; got columns: %v", colNames)
+	}
+	return l, nil
+}
 
-	if valueIdx == -1 {
-		return nil, fmt.Errorf("query must return at least one numeric column for the value; got columns: %v", colNames)
+func mapRows(rows driver.Rows, evalTS time.Time) ([]Metric, error) {
+	colTypes := rows.ColumnTypes()
+	if len(colTypes) == 0 {
+		return nil, nil
+	}
+
+	layout, err := classifyColumns(colTypes, rows.Columns())
+	if err != nil {
+		return nil, err
 	}
 
 	var metrics []Metric
 	for rows.Next() {
-		// Allocate scan targets
 		scanDest := make([]any, len(colTypes))
 		for i, ct := range colTypes {
 			scanDest[i] = reflect.New(ct.ScanType()).Interface()
 		}
-
 		if err := rows.Scan(scanDest...); err != nil {
 			return nil, fmt.Errorf("scanning row: %w", err)
 		}
-
-		m := Metric{}
-
-		// Extract labels from string columns
-		for i, role := range roles {
-			if role != roleLabel {
-				continue
-			}
-			val := derefToString(scanDest[i])
-			if val == "" {
-				continue
-			}
-			m.Labels = append(m.Labels, Label{
-				Name:  colNames[i],
-				Value: val,
-			})
-		}
-
-		// Extract value
-		v, err := derefToFloat64(scanDest[valueIdx])
+		m, err := layout.metric(scanDest, evalTS)
 		if err != nil {
-			return nil, fmt.Errorf("column %q: %w", colNames[valueIdx], err)
+			return nil, err
 		}
-		m.Values = []float64{v}
-
-		// Extract timestamp
-		ts := evalTS
-		if tsIdx >= 0 {
-			if t, ok := derefToTime(scanDest[tsIdx]); ok {
-				ts = t
-			}
-		}
-		m.Timestamps = []int64{ts.Unix()}
-
 		metrics = append(metrics, m)
 	}
 
@@ -204,6 +182,35 @@ func mapRows(rows driver.Rows, evalTS time.Time) ([]Metric, error) {
 	}
 
 	return metrics, nil
+}
+
+// metric builds a Metric from one scanned row. Rows without a timestamp
+// column are stamped with evalTS.
+func (l columnLayout) metric(row []any, evalTS time.Time) (Metric, error) {
+	m := Metric{}
+	for i, role := range l.roles {
+		if role != roleLabel {
+			continue
+		}
+		if val := derefToString(row[i]); val != "" {
+			m.Labels = append(m.Labels, Label{Name: l.names[i], Value: val})
+		}
+	}
+
+	v, err := derefToFloat64(row[l.valueIdx])
+	if err != nil {
+		return Metric{}, fmt.Errorf("column %q: %w", l.names[l.valueIdx], err)
+	}
+	m.Values = []float64{v}
+
+	ts := evalTS
+	if l.tsIdx >= 0 {
+		if t, ok := derefToTime(row[l.tsIdx]); ok {
+			ts = t
+		}
+	}
+	m.Timestamps = []int64{ts.Unix()}
+	return m, nil
 }
 
 // isStringType returns true for ClickHouse string-family types.

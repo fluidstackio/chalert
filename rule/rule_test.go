@@ -2,6 +2,7 @@ package rule
 
 import (
 	"context"
+	"slices"
 	"testing"
 	"time"
 
@@ -340,90 +341,66 @@ func TestKeepFiringFor_ReMatchResetsTimer(t *testing.T) {
 	now := time.Now()
 
 	// Fire the alert
-	_, err := r.Exec(context.Background(), now, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
+	mustExec(t, r, now)
 
 	// Remove data — starts keep_firing_for
 	q.results = noData
-	_, err = r.Exec(context.Background(), now.Add(time.Minute), 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Verify KeepFiringSince is set
-	allAlerts := r.GetAlerts()
-	if len(allAlerts) != 1 {
-		t.Fatalf("expected 1 alert, got %d", len(allAlerts))
-	}
-	if allAlerts[0].KeepFiringSince.IsZero() {
+	mustExec(t, r, now.Add(time.Minute))
+	if soleAlert(t, r).KeepFiringSince.IsZero() {
 		t.Fatal("expected KeepFiringSince to be set")
 	}
 
 	// Re-match before keep_firing_for expires
 	q.results = matchData
-	_, err = r.Exec(context.Background(), now.Add(2*time.Minute), 0)
-	if err != nil {
-		t.Fatal(err)
-	}
+	mustExec(t, r, now.Add(2*time.Minute))
 
 	// KeepFiringSince should be reset to zero
-	allAlerts = r.GetAlerts()
-	if len(allAlerts) != 1 {
-		t.Fatalf("expected 1 alert, got %d", len(allAlerts))
+	a := soleAlert(t, r)
+	if !a.KeepFiringSince.IsZero() {
+		t.Errorf("expected KeepFiringSince to be reset to zero after re-match, got %v", a.KeepFiringSince)
 	}
-	if !allAlerts[0].KeepFiringSince.IsZero() {
-		t.Errorf("expected KeepFiringSince to be reset to zero after re-match, got %v", allAlerts[0].KeepFiringSince)
-	}
-	if allAlerts[0].State != StateFiring {
-		t.Errorf("expected Firing state, got %s", allAlerts[0].State)
+	if a.State != StateFiring {
+		t.Errorf("expected Firing state, got %s", a.State)
 	}
 
 	// Remove data again — new keep_firing_for window
 	q.results = noData
-	_, err = r.Exec(context.Background(), now.Add(3*time.Minute), 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	allAlerts = r.GetAlerts()
-	if len(allAlerts) != 1 {
-		t.Fatalf("expected 1 alert, got %d", len(allAlerts))
-	}
-	if allAlerts[0].KeepFiringSince.IsZero() {
+	mustExec(t, r, now.Add(3*time.Minute))
+	if soleAlert(t, r).KeepFiringSince.IsZero() {
 		t.Fatal("expected new KeepFiringSince to be set")
 	}
 
 	// Should still fire at +7m (only 4m into new keep_firing_for window)
-	alerts, err := r.Exec(context.Background(), now.Add(7*time.Minute), 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	firing := false
-	for _, a := range alerts {
-		if a.State == StateFiring {
-			firing = true
-		}
-	}
-	if !firing {
+	if !anyFiring(mustExec(t, r, now.Add(7*time.Minute))) {
 		t.Error("expected alert to still be firing within new keep_firing_for window")
 	}
 
 	// Should resolve at +9m (6m into new keep_firing_for window > 5m)
-	alerts, err = r.Exec(context.Background(), now.Add(9*time.Minute), 0)
+	if anyFiring(mustExec(t, r, now.Add(9*time.Minute))) {
+		t.Error("expected alert to resolve after new keep_firing_for window elapsed")
+	}
+}
+
+func mustExec(t *testing.T, r *AlertingRule, ts time.Time) []AlertInstance {
+	t.Helper()
+	alerts, err := r.Exec(context.Background(), ts, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	stillFiring := false
-	for _, a := range alerts {
-		if a.State == StateFiring {
-			stillFiring = true
-		}
+	return alerts
+}
+
+func soleAlert(t *testing.T, r *AlertingRule) AlertInstance {
+	t.Helper()
+	all := r.GetAlerts()
+	if len(all) != 1 {
+		t.Fatalf("expected 1 alert, got %d", len(all))
 	}
-	if stillFiring {
-		t.Error("expected alert to resolve after new keep_firing_for window elapsed")
-	}
+	return all[0]
+}
+
+func anyFiring(alerts []AlertInstance) bool {
+	return slices.ContainsFunc(alerts, func(a AlertInstance) bool { return a.State == StateFiring })
 }
 
 func TestKeepFiringFor_StatePreservedAcrossRestore(t *testing.T) {

@@ -163,83 +163,8 @@ func (g *Group) Start(ctx context.Context, notifier Notifier, store StateStore, 
 		"rules", len(g.Rules),
 		"concurrency", g.Concurrency)
 
-	eval := func(ctx context.Context, ts time.Time) {
-		g.mu.RLock()
-		rules := g.Rules
-		concurrency := g.Concurrency
-		limit := g.Limit
-		g.mu.RUnlock()
-
-		// Retirement rows that failed to write are retried on every
-		// group's evaluation, whichever group retired them.
-		g.retire.Flush(ctx)
-		if len(rules) == 0 {
-			return
-		}
-
-		// Adjust timestamp for eval delay
-		evalTS := ts
-		if g.EvalDelay != nil {
-			evalTS = ts.Add(-*g.EvalDelay)
-		}
-
-		evalStart := time.Now()
-		slog.Info("chalert group eval started",
-			"group", g.Name,
-			"rules", len(rules),
-			"eval_ts", evalTS)
-
-		allAlerts, evals := g.execRules(ctx, rules, evalTS, evalStart, concurrency, limit)
-
-		var firing, resolved int
-		for _, a := range allAlerts {
-			switch a.State {
-			case StateFiring:
-				firing++
-			case StateInactive:
-				resolved++
-			default:
-			}
-		}
-		slog.Info("chalert group eval complete",
-			"group", g.Name,
-			"duration", time.Since(evalStart),
-			"alerts_to_send", len(allAlerts),
-			"firing", firing,
-			"resolved", resolved)
-
-		// Send notifications
-		if notifier != nil && len(allAlerts) > 0 {
-			slog.Info("chalert sending notifications",
-				"group", g.Name,
-				"firing", firing,
-				"resolved", resolved)
-			if err := notifier.Send(ctx, allAlerts); err != nil {
-				slog.Error("chalert notification failed",
-					"group", g.Name, "error", err)
-			} else {
-				slog.Info("chalert notifications sent successfully",
-					"group", g.Name,
-					"firing", firing,
-					"resolved", resolved)
-			}
-		}
-
-		// Persist state
-		if store != nil && len(allAlerts) > 0 {
-			if err := store.RecordHistory(ctx, evalStart, allAlerts); err != nil {
-				slog.Error("chalert state persistence failed",
-					"group", g.Name, "error", err)
-			}
-		}
-		// Every evaluation is recorded, whether or not it produced alerts.
-		if evalLog != nil && len(evals) > 0 {
-			evalLog.RecordEvaluations(evals)
-		}
-	}
-
 	// First evaluation immediately
-	eval(ctx, time.Now())
+	g.evaluate(ctx, time.Now(), notifier, store, evalLog)
 
 	ticker := time.NewTicker(g.Interval)
 	defer ticker.Stop()
@@ -257,9 +182,79 @@ func (g *Group) Start(ctx context.Context, notifier Notifier, store StateStore, 
 			slog.Info("chalert group updated", "group", g.Name)
 			g.retireRules(ctx, dropped)
 		case ts := <-ticker.C:
-			eval(ctx, ts)
+			g.evaluate(ctx, ts, notifier, store, evalLog)
 		}
 	}
+}
+
+func (g *Group) evaluate(ctx context.Context, ts time.Time, notifier Notifier, store StateStore, evalLog EvaluationRecorder) {
+	g.mu.RLock()
+	rules := g.Rules
+	concurrency := g.Concurrency
+	limit := g.Limit
+	g.mu.RUnlock()
+
+	// Retirement rows that failed to write are retried on every
+	// group's evaluation, whichever group retired them.
+	g.retire.Flush(ctx)
+	if len(rules) == 0 {
+		return
+	}
+
+	// Adjust timestamp for eval delay
+	evalTS := ts
+	if g.EvalDelay != nil {
+		evalTS = ts.Add(-*g.EvalDelay)
+	}
+
+	evalStart := time.Now()
+	slog.Info("chalert group eval started",
+		"group", g.Name,
+		"rules", len(rules),
+		"eval_ts", evalTS)
+
+	allAlerts, evals := g.execRules(ctx, rules, evalTS, evalStart, concurrency, limit)
+
+	firing, resolved := countStates(allAlerts)
+	slog.Info("chalert group eval complete",
+		"group", g.Name,
+		"duration", time.Since(evalStart),
+		"alerts_to_send", len(allAlerts),
+		"firing", firing,
+		"resolved", resolved)
+
+	if len(allAlerts) > 0 {
+		g.notify(ctx, notifier, allAlerts, firing, resolved)
+		if store != nil {
+			if err := store.RecordHistory(ctx, evalStart, allAlerts); err != nil {
+				slog.Error("chalert state persistence failed",
+					"group", g.Name, "error", err)
+			}
+		}
+	}
+	// Every evaluation is recorded, whether or not it produced alerts.
+	if evalLog != nil && len(evals) > 0 {
+		evalLog.RecordEvaluations(evals)
+	}
+}
+
+func (g *Group) notify(ctx context.Context, notifier Notifier, alerts []AlertInstance, firing, resolved int) {
+	if notifier == nil {
+		return
+	}
+	slog.Info("chalert sending notifications",
+		"group", g.Name,
+		"firing", firing,
+		"resolved", resolved)
+	if err := notifier.Send(ctx, alerts); err != nil {
+		slog.Error("chalert notification failed",
+			"group", g.Name, "error", err)
+		return
+	}
+	slog.Info("chalert notifications sent successfully",
+		"group", g.Name,
+		"firing", firing,
+		"resolved", resolved)
 }
 
 // execRules evaluates rules with the given concurrency. It returns the

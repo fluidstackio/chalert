@@ -1,6 +1,6 @@
 module github.com/garbett1/chalert
 
-go 1.26.10
+go 1.27.3
 
 require (
 	github.com/ClickHouse/clickhouse-go/v2 v2.43.0

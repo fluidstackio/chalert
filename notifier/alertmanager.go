@@ -63,6 +63,7 @@ type AlertManager struct {
 	bearerToken string
 }
 
+// New returns a notifier that pushes to every Alertmanager in cfg.
 func New(cfg Config) *AlertManager {
 	timeout := cfg.Timeout
 	if timeout == 0 {
@@ -100,6 +101,7 @@ func (am *AlertManager) Send(ctx context.Context, alerts []rule.AlertInstance) e
 				"group", a.GroupName,
 				"labels", a.Labels,
 				"resolved_at", a.ResolvedAt)
+		default:
 		}
 	}
 	slog.Info("chalert notifier: pushing to alertmanager",
@@ -118,9 +120,7 @@ func (am *AlertManager) Send(ctx context.Context, alerts []rule.AlertInstance) e
 
 	for _, u := range am.urls {
 		u := u
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			defer func() {
 				if rec := recover(); rec != nil {
 					slog.Error("chalert panic in notifier", "url", u, "panic", rec)
@@ -133,7 +133,7 @@ func (am *AlertManager) Send(ctx context.Context, alerts []rule.AlertInstance) e
 			} else {
 				metrics.NotifierSends.WithLabelValues(u, "success").Inc()
 			}
-		}()
+		})
 	}
 
 	wg.Wait()

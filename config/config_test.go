@@ -35,7 +35,7 @@ groups:
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "rules.yaml")
-	if err := os.WriteFile(path, []byte(yaml), 0644); err != nil {
+	if err := os.WriteFile(path, []byte(yaml), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -175,7 +175,7 @@ groups:
 		t.Run(tt.name, func(t *testing.T) {
 			dir := t.TempDir()
 			path := filepath.Join(dir, "rules.yaml")
-			if err := os.WriteFile(path, []byte(tt.yaml), 0644); err != nil {
+			if err := os.WriteFile(path, []byte(tt.yaml), 0o644); err != nil {
 				t.Fatal(err)
 			}
 			_, err := Parse([]string{path})
@@ -199,7 +199,7 @@ groups:
 `
 	dir := t.TempDir()
 	path := filepath.Join(dir, "rules.yaml")
-	if err := os.WriteFile(path, []byte(yaml), 0644); err != nil {
+	if err := os.WriteFile(path, []byte(yaml), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -283,7 +283,7 @@ func TestNormalizeRuleIDs_DuplicateDetection(t *testing.T) {
 	// A query hash that always returns the same value (simulates
 	// normalizedQueryHashKeepNames merging two exprs that differ
 	// only in literal values).
-	constantHash := func(expr string) (uint64, error) {
+	constantHash := func(string) (uint64, error) {
 		return 42, nil
 	}
 
@@ -308,7 +308,7 @@ func TestNormalizeRuleIDs_DuplicateDetection(t *testing.T) {
 
 func TestNormalizeRuleIDs_DifferentNamesSameExprOK(t *testing.T) {
 	// Same expr hash but different names should produce different rule IDs.
-	constantHash := func(expr string) (uint64, error) {
+	constantHash := func(string) (uint64, error) {
 		return 42, nil
 	}
 
@@ -386,7 +386,7 @@ groups:
 `
 	dir := t.TempDir()
 	path := filepath.Join(dir, "rules.yaml")
-	if err := os.WriteFile(path, []byte(yaml), 0644); err != nil {
+	if err := os.WriteFile(path, []byte(yaml), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -412,13 +412,13 @@ groups:
       - alert: TestAlert
         expr: SELECT 1 AS value
 `
-	if err := os.WriteFile(filepath.Join(dir, "rules.yaml"), []byte(yaml), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "rules.yaml"), []byte(yaml), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
 	// Create directories that mimic ConfigMap metadata (..data, ..timestamp)
 	for _, d := range []string{"..data", "..2026_03_24_12_00_00.123456"} {
-		if err := os.Mkdir(filepath.Join(dir, d), 0755); err != nil {
+		if err := os.Mkdir(filepath.Join(dir, d), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -448,7 +448,7 @@ groups:
 `
 	dir := t.TempDir()
 	path := filepath.Join(dir, "rules.yaml")
-	if err := os.WriteFile(path, []byte(yaml), 0644); err != nil {
+	if err := os.WriteFile(path, []byte(yaml), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -477,7 +477,7 @@ func TestFingerprint(t *testing.T) {
 	write := func(t *testing.T, dir, name, content string) string {
 		t.Helper()
 		path := filepath.Join(dir, name)
-		if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 			t.Fatal(err)
 		}
 		return path

@@ -26,7 +26,7 @@ func New(addr, version string) *Server {
 	mux.HandleFunc("GET /ready", s.handleReady)
 	mux.HandleFunc("POST /-/reload", s.handleReload)
 	mux.Handle("GET /metrics", promhttp.Handler())
-	mux.HandleFunc("GET /version", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /version", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]string{"version": version})
 	})

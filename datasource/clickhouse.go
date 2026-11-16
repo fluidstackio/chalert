@@ -48,10 +48,12 @@ type ClickHouseQuerierBuilder struct {
 	conn driver.Conn
 }
 
+// NewQuerierBuilder returns a builder whose queriers share conn.
 func NewQuerierBuilder(conn driver.Conn) *ClickHouseQuerierBuilder {
 	return &ClickHouseQuerierBuilder{conn: conn}
 }
 
+// BuildWithParams returns a querier configured for one rule group.
 func (b *ClickHouseQuerierBuilder) BuildWithParams(params QuerierParams) Querier {
 	return &ClickHouseQuerier{
 		conn:               b.conn,
@@ -61,6 +63,7 @@ func (b *ClickHouseQuerierBuilder) BuildWithParams(params QuerierParams) Querier
 	}
 }
 
+// Query runs expr as of ts.
 func (q *ClickHouseQuerier) Query(ctx context.Context, expr string, ts time.Time) (Result, error) {
 	slog.Info("chalert query", "expr", truncate(expr, 200), "ts", ts)
 
@@ -87,7 +90,8 @@ func (q *ClickHouseQuerier) Query(ctx context.Context, expr string, ts time.Time
 	return Result{Data: metrics}, nil
 }
 
-func (q *ClickHouseQuerier) QueryRange(ctx context.Context, expr string, start, end time.Time) (Result, error) {
+// QueryRange runs expr as of end; rules template their own window from {chalert_eval_ts}.
+func (q *ClickHouseQuerier) QueryRange(ctx context.Context, expr string, _, end time.Time) (Result, error) {
 	// For range queries (replay/backfill), we execute the same SQL but let the
 	// query author handle the time range via {chalert_eval_ts} parameter.
 	// This is a simplification — vmalert's range query adds step-based iteration,

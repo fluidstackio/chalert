@@ -78,7 +78,7 @@ func TestReloadRendersEditedAnnotations(t *testing.T) {
 	}
 
 	g.mu.Lock()
-	dropped := g.updateWith(group("new {{ .Labels.service }}"))
+	dropped := g.applyUpdate(group("new {{ .Labels.service }}"))
 	g.mu.Unlock()
 	if len(dropped) != 0 || len(g.Rules) != 1 || g.Rules[0] != r {
 		t.Fatalf("an annotation edit replaced the rule: dropped %d, rules %d", len(dropped), len(g.Rules))

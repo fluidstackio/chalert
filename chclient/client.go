@@ -26,6 +26,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -128,7 +129,7 @@ func (t TLSConfig) buildTLSConfig() (*tls.Config, error) {
 
 	if t.CertFile != "" || t.KeyFile != "" {
 		if t.CertFile == "" || t.KeyFile == "" {
-			return nil, fmt.Errorf("both tls.certFile and tls.keyFile must be set for mTLS")
+			return nil, errors.New("both tls.certFile and tls.keyFile must be set for mTLS")
 		}
 		cert, err := tls.LoadX509KeyPair(t.CertFile, t.KeyFile)
 		if err != nil {
@@ -148,6 +149,7 @@ type Client struct {
 	maxQueryTime time.Duration
 }
 
+// New opens the read and write connection pools described by cfg.
 func New(cfg Config) (*Client, error) {
 	if cfg.MaxQueryTime == 0 {
 		cfg.MaxQueryTime = 30 * time.Second

@@ -15,7 +15,8 @@ package rule
 import (
 	"context"
 	"fmt"
-	"sort"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -32,10 +33,14 @@ type expectedAlert struct {
 // For each step: sets querier results, calls Exec(), advances timestamp by step,
 // then compares alert states against expected.
 func execSteps(t *testing.T, ar *AlertingRule, step time.Duration,
-	steps [][]datasource.Metric, expected map[int][]expectedAlert) {
+	steps [][]datasource.Metric, expected map[int][]expectedAlert,
+) {
 	t.Helper()
 
-	q := ar.querier.(*fakeQuerier)
+	q, ok := ar.querier.(*fakeQuerier)
+	if !ok {
+		t.Fatalf("querier is %T, want *fakeQuerier", ar.querier)
+	}
 	ts := time.Date(2024, 10, 29, 0, 0, 0, 0, time.UTC)
 
 	for i, metrics := range steps {
@@ -86,31 +91,24 @@ func execSteps(t *testing.T, ar *AlertingRule, step time.Duration,
 }
 
 func fmtExpected(exp []expectedAlert) string {
-	var parts []string
+	parts := make([]string, 0, len(exp))
 	for _, e := range exp {
 		parts = append(parts, fmt.Sprintf("{labels:%v state:%s}", e.labels, e.state))
 	}
-	return fmt.Sprintf("[%s]", join(parts, ", "))
+	return sortedList(parts)
 }
 
 func fmtAlerts(alerts []AlertInstance) string {
-	var parts []string
+	parts := make([]string, 0, len(alerts))
 	for _, a := range alerts {
 		parts = append(parts, fmt.Sprintf("{labels:%v state:%s}", a.Labels, a.State))
 	}
-	return fmt.Sprintf("[%s]", join(parts, ", "))
+	return sortedList(parts)
 }
 
-func join(s []string, sep string) string {
-	sort.Strings(s)
-	result := ""
-	for i, v := range s {
-		if i > 0 {
-			result += sep
-		}
-		result += v
-	}
-	return result
+func sortedList(parts []string) string {
+	slices.Sort(parts)
+	return "[" + strings.Join(parts, ", ") + "]"
 }
 
 // metric creates a datasource.Metric with the given label key-value pairs.
@@ -326,7 +324,7 @@ func TestConformance_KeepFiringForDataReturns(t *testing.T) {
 		[][]datasource.Metric{
 			{metric("name", "foo")},
 			{metric("name", "foo")},
-			{}, // empty — keep firing for 1 step
+			{},                      // empty — keep firing for 1 step
 			{metric("name", "foo")}, // data returns
 		},
 		map[int][]expectedAlert{

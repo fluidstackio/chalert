@@ -32,7 +32,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"log/slog"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"text/template"
@@ -47,6 +47,7 @@ import (
 // AlertState represents the state of an alert instance.
 type AlertState int
 
+// Alert instance states, mirroring Prometheus.
 const (
 	StateInactive AlertState = iota
 	StatePending
@@ -328,6 +329,7 @@ func (ar *AlertingRule) Exec(ctx context.Context, ts time.Time, limit int) ([]Al
 				a.ResolvedAt = ts
 				ar.logDebug(ts, a, "FIRING => INACTIVE (absent)")
 				continue
+			default:
 			}
 		} else {
 			numActive++
@@ -356,6 +358,7 @@ func (ar *AlertingRule) Exec(ctx context.Context, ts time.Time, limit int) ([]Al
 				firing++
 			case StateInactive:
 				resolved++
+			default:
 			}
 		}
 		slog.Info("chalert rule alerts to send",
@@ -512,7 +515,7 @@ func hashLabels(labels map[string]string) uint64 {
 	for k := range labels {
 		keys = append(keys, k)
 	}
-	sort.Strings(keys)
+	slices.Sort(keys)
 	for _, k := range keys {
 		h.Write([]byte(k))
 		h.Write([]byte(labels[k]))

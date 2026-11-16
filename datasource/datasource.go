@@ -68,7 +68,7 @@ func (m *Metric) SetLabel(key, value string) {
 	m.Labels = append(m.Labels, Label{Name: key, Value: value})
 }
 
-// Label returns the value for the given label key, or "" if not found.
+// GetLabel returns the value for the given label key, or "" if not found.
 func (m *Metric) GetLabel(key string) string {
 	for _, l := range m.Labels {
 		if l.Name == key {

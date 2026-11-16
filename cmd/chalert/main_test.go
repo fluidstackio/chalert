@@ -38,7 +38,7 @@ func (fakeQuerierBuilder) BuildWithParams(datasource.QuerierParams) datasource.Q
 func parseGroups(t *testing.T, dir, yaml string) []config.Group {
 	t.Helper()
 	path := filepath.Join(dir, "rules.yaml")
-	if err := os.WriteFile(path, []byte(yaml), 0644); err != nil {
+	if err := os.WriteFile(path, []byte(yaml), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	groups, err := config.Parse([]string{path})
@@ -81,11 +81,9 @@ groups:
 	for _, cfg := range initial {
 		g := rule.NewGroup(cfg, qb, opts)
 		registry[g.ID()] = g
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			g.Start(ctx, nil, nil, nil)
-		}()
+		})
 	}
 	defer func() {
 		cancel()
@@ -174,11 +172,9 @@ groups:
 	for _, cfg := range initial {
 		g := rule.NewGroup(cfg, qb, opts)
 		registry[g.ID()] = g
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			g.Start(ctx, nil, nil, nil)
-		}()
+		})
 	}
 	defer func() {
 		cancel()

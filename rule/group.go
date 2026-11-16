@@ -198,6 +198,7 @@ func (g *Group) Start(ctx context.Context, notifier Notifier, store StateStore, 
 				firing++
 			case StateInactive:
 				resolved++
+			default:
 			}
 		}
 		slog.Info("chalert group eval complete",
@@ -251,7 +252,7 @@ func (g *Group) Start(ctx context.Context, notifier Notifier, store StateStore, 
 			return
 		case ng := <-g.updateCh:
 			g.mu.Lock()
-			dropped := g.updateWith(ng)
+			dropped := g.applyUpdate(ng)
 			g.mu.Unlock()
 			slog.Info("chalert group updated", "group", g.Name)
 			g.retireRules(ctx, dropped)
@@ -307,9 +308,7 @@ func (g *Group) execRules(ctx context.Context, rules []*AlertingRule, ts, at tim
 	var wg sync.WaitGroup
 	for _, r := range rules {
 		r := r
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			start := time.Now()
 			defer func() {
 				if rec := recover(); rec != nil {
@@ -325,7 +324,7 @@ func (g *Group) execRules(ctx context.Context, rules []*AlertingRule, ts, at tim
 			start = time.Now()
 			alerts, err := r.Exec(ctx, ts, limit)
 			results <- result{alerts: alerts, samples: r.lastMatches(), err: err, r: r, duration: time.Since(start)}
-		}()
+		})
 	}
 
 	go func() {
@@ -383,10 +382,10 @@ func (g *Group) evaluation(r *AlertingRule, at time.Time, duration time.Duration
 	return e
 }
 
-// updateWith replaces the group's rules with those from newGroup and returns
+// applyUpdate replaces the group's rules with those from newGroup and returns
 // the rules it dropped: those whose ID no new rule carries, since an edit to
 // a rule's query, name or labels changes its ID. Must be called with mu held.
-func (g *Group) updateWith(ng *Group) []*AlertingRule {
+func (g *Group) applyUpdate(ng *Group) []*AlertingRule {
 	// Build registry of new rules by ID
 	newRules := make(map[uint64]*AlertingRule)
 	for _, r := range ng.Rules {

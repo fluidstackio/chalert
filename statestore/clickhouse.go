@@ -111,7 +111,8 @@ func (s *Store) Save(ctx context.Context, instances []rule.AlertInstance) error 
 	}
 
 	batch, err := s.conn.PrepareBatch(ctx, fmt.Sprintf(
-		"INSERT INTO %s.alert_state", s.database))
+		"INSERT INTO %s.alert_state", s.database,
+	))
 	if err != nil {
 		return fmt.Errorf("preparing batch: %w", err)
 	}
@@ -132,7 +133,7 @@ func (s *Store) Save(ctx context.Context, instances []rule.AlertInstance) error 
 			keepFiringSince = &t
 		}
 
-		if err := batch.Append(
+		err := batch.Append(
 			inst.RuleID,
 			inst.ID,
 			inst.GroupName,
@@ -147,7 +148,8 @@ func (s *Store) Save(ctx context.Context, instances []rule.AlertInstance) error 
 			inst.Annotations,
 			keepFiringSince,
 			now,
-		); err != nil {
+		)
+		if err != nil {
 			return fmt.Errorf("appending to batch: %w", err)
 		}
 	}
@@ -186,12 +188,13 @@ func (s *Store) LoadActive(ctx context.Context) ([]rule.AlertInstance, error) {
 			resolvedAt      *time.Time
 			keepFiringSince *time.Time
 		)
-		if err := rows.Scan(
+		err := rows.Scan(
 			&inst.RuleID, &inst.ID, &inst.GroupName, &inst.AlertName,
 			&stateStr, &inst.Labels, &inst.Value, &inst.Expr,
 			&inst.ActiveAt, &firedAt, &resolvedAt, &inst.Annotations,
 			&keepFiringSince,
-		); err != nil {
+		)
+		if err != nil {
 			return nil, fmt.Errorf("scanning row: %w", err)
 		}
 		inst.State = enumToState(stateStr)
@@ -218,14 +221,15 @@ func (s *Store) RecordHistory(ctx context.Context, evaluatedAt time.Time, instan
 	}
 
 	batch, err := s.conn.PrepareBatch(ctx, fmt.Sprintf(
-		"INSERT INTO %s.alert_history", s.database))
+		"INSERT INTO %s.alert_history", s.database,
+	))
 	if err != nil {
 		return fmt.Errorf("preparing history batch: %w", err)
 	}
 
 	now := time.Now()
 	for _, inst := range instances {
-		if err := batch.Append(
+		err := batch.Append(
 			inst.RuleID,
 			inst.ID,
 			inst.GroupName,
@@ -237,7 +241,8 @@ func (s *Store) RecordHistory(ctx context.Context, evaluatedAt time.Time, instan
 			inst.Annotations,
 			evaluatedAt,
 			now, // event_time: when the row was written
-		); err != nil {
+		)
+		if err != nil {
 			return fmt.Errorf("appending to history batch: %w", err)
 		}
 	}

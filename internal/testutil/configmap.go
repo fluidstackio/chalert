@@ -20,11 +20,11 @@ func WriteConfigMapVolume(t testing.TB, dir string, files map[string]string) {
 	t.Helper()
 	payloadName := fmt.Sprintf("..payload_%d", payloadSeq.Add(1))
 	payload := filepath.Join(dir, payloadName)
-	if err := os.Mkdir(payload, 0755); err != nil {
+	if err := os.Mkdir(payload, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	for name, content := range files {
-		if err := os.WriteFile(filepath.Join(payload, name), []byte(content), 0644); err != nil {
+		if err := os.WriteFile(filepath.Join(payload, name), []byte(content), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}

@@ -16,7 +16,7 @@ func TestHandleReload(t *testing.T) {
 	t.Run("503 before a reload func is registered", func(t *testing.T) {
 		_, h := newTestServer()
 		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/-/reload", nil))
+		h.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/-/reload", nil))
 		if rec.Code != http.StatusServiceUnavailable {
 			t.Errorf("expected 503, got %d", rec.Code)
 		}
@@ -28,7 +28,7 @@ func TestHandleReload(t *testing.T) {
 		s.SetReloadFunc(func() { calls.Add(1) })
 
 		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/-/reload", nil))
+		h.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/-/reload", nil))
 		if rec.Code != http.StatusAccepted {
 			t.Errorf("expected 202, got %d", rec.Code)
 		}
@@ -36,7 +36,7 @@ func TestHandleReload(t *testing.T) {
 			t.Errorf("expected 1 reload call, got %d", got)
 		}
 
-		h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/-/reload", nil))
+		h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/-/reload", nil))
 		if got := calls.Load(); got != 2 {
 			t.Errorf("expected 2 reload calls, got %d", got)
 		}
@@ -48,7 +48,7 @@ func TestHandleReload(t *testing.T) {
 		s.SetReloadFunc(func() { calls.Add(1) })
 
 		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/-/reload", nil))
+		h.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/-/reload", nil))
 		if rec.Code != http.StatusMethodNotAllowed {
 			t.Errorf("expected 405, got %d", rec.Code)
 		}
@@ -62,14 +62,14 @@ func TestHandleReady(t *testing.T) {
 	s, h := newTestServer()
 
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/ready", nil))
+	h.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/ready", nil))
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Errorf("expected 503 before ready, got %d", rec.Code)
 	}
 
 	s.SetReady(true)
 	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/ready", nil))
+	h.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/ready", nil))
 	if rec.Code != http.StatusOK {
 		t.Errorf("expected 200 when ready, got %d", rec.Code)
 	}
@@ -78,7 +78,7 @@ func TestHandleReady(t *testing.T) {
 func TestHandleHealth(t *testing.T) {
 	_, h := newTestServer()
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
+	h.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/health", nil))
 	if rec.Code != http.StatusOK {
 		t.Errorf("expected 200, got %d", rec.Code)
 	}

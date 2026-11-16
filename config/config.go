@@ -20,17 +20,20 @@ package config
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/binary"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v4"
 )
 
 // Group contains a list of rules grouped with a shared evaluation interval.
@@ -108,19 +111,19 @@ func (r *Rule) IsRecording() bool {
 // Validate checks for configuration errors.
 func (r *Rule) Validate() error {
 	if r.Alert == "" && r.Record == "" {
-		return fmt.Errorf("either 'alert' or 'record' must be set")
+		return errors.New("either 'alert' or 'record' must be set")
 	}
 	if r.Alert != "" && r.Record != "" {
-		return fmt.Errorf("'alert' and 'record' are mutually exclusive")
+		return errors.New("'alert' and 'record' are mutually exclusive")
 	}
 	if r.Expr == "" {
-		return fmt.Errorf("'expr' cannot be empty")
+		return errors.New("'expr' cannot be empty")
 	}
 	if r.IsRecording() && len(r.Annotations) > 0 {
-		return fmt.Errorf("recording rules cannot have annotations")
+		return errors.New("recording rules cannot have annotations")
 	}
 	if r.IsRecording() && r.For.Duration() > 0 {
-		return fmt.Errorf("recording rules cannot have 'for' duration")
+		return errors.New("recording rules cannot have 'for' duration")
 	}
 
 	// Basic SQL sanity checks. Full validation requires a CH connection.
@@ -225,16 +228,16 @@ func hashRuleWithExprHash(exprHash uint64, r Rule) uint64 {
 // Validate checks the group for configuration errors.
 func (g *Group) Validate() error {
 	if g.Name == "" {
-		return fmt.Errorf("group name must be set")
+		return errors.New("group name must be set")
 	}
 	if g.Interval.Duration() < 0 {
-		return fmt.Errorf("interval must be >= 0")
+		return errors.New("interval must be >= 0")
 	}
 	if g.Concurrency < 0 {
-		return fmt.Errorf("concurrency must be >= 0")
+		return errors.New("concurrency must be >= 0")
 	}
 	if g.Limit != nil && *g.Limit < 0 {
-		return fmt.Errorf("limit must be >= 0")
+		return errors.New("limit must be >= 0")
 	}
 
 	uniqueRules := make(map[uint64]struct{})
@@ -260,7 +263,7 @@ func Parse(pathPatterns []string) ([]Group, error) {
 	return snap.Parse()
 }
 
-func parse(files map[string][]byte) ([]Group, error) {
+func parseFiles(files map[string][]byte) ([]Group, error) {
 	var groups []Group
 	for file, data := range files {
 		data = envSubstitute(data)
@@ -272,7 +275,7 @@ func parse(files map[string][]byte) ([]Group, error) {
 				Groups []Group `yaml:"groups"`
 			}
 			if err := decoder.Decode(&doc); err != nil {
-				if err == io.EOF {
+				if errors.Is(err, io.EOF) {
 					break
 				}
 				return nil, fmt.Errorf("failed to parse %q: %w", file, err)
@@ -290,7 +293,7 @@ func parse(files map[string][]byte) ([]Group, error) {
 				b, _ := yaml.Marshal(g)
 				h := fnv.New64a()
 				h.Write(b)
-				g.Checksum = fmt.Sprintf("%x", h.Sum(nil))
+				g.Checksum = hex.EncodeToString(h.Sum(nil))
 
 				if err := g.Validate(); err != nil {
 					return nil, fmt.Errorf("invalid group %q in %q: %w", g.Name, file, err)
@@ -327,7 +330,7 @@ func (s *Snapshot) Fingerprint() uint64 {
 	for path := range s.files {
 		paths = append(paths, path)
 	}
-	sort.Strings(paths)
+	slices.Sort(paths)
 
 	h := fnv.New64a()
 	for _, path := range paths {
@@ -341,7 +344,7 @@ func (s *Snapshot) Fingerprint() uint64 {
 
 // Parse parses the snapshot's files into rule groups.
 func (s *Snapshot) Parse() ([]Group, error) {
-	return parse(s.files)
+	return parseFiles(s.files)
 }
 
 func readFiles(patterns []string) (map[string][]byte, error) {
@@ -396,12 +399,15 @@ type Duration struct {
 	D time.Duration
 }
 
+// Duration returns the wrapped time.Duration.
 func (d Duration) Duration() time.Duration { return d.D }
 
+// MarshalYAML encodes the duration in time.Duration string form.
 func (d Duration) MarshalYAML() (any, error) {
 	return d.D.String(), nil
 }
 
+// UnmarshalYAML parses a time.ParseDuration string; an empty string leaves it zero.
 func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
 	var s string
 	if err := value.Decode(&s); err != nil {
@@ -427,8 +433,8 @@ func sortedMapEntries(m map[string]string) []mapEntry {
 	for k, v := range m {
 		entries = append(entries, mapEntry{k, v})
 	}
-	sort.Slice(entries, func(i, j int) bool {
-		return entries[i].key < entries[j].key
+	slices.SortFunc(entries, func(a, b mapEntry) int {
+		return cmp.Compare(a.key, b.key)
 	})
 	return entries
 }

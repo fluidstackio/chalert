@@ -28,6 +28,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -128,7 +129,7 @@ func main() {
 	slog.Info("parsed rule groups", "count", len(groups))
 
 	if *dryRun {
-		fmt.Printf("Validation successful: %d groups, %d total rules\n",
+		_, _ = fmt.Fprintf(os.Stdout, "Validation successful: %d groups, %d total rules\n",
 			len(groups), countRules(groups))
 		return
 	}
@@ -136,7 +137,7 @@ func main() {
 	// Start HTTP server for health checks, metrics, and version info.
 	httpSrv := web.New(*httpAddr, version)
 	go func() {
-		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			slog.Error("http server error", "error", err)
 		}
 	}()
@@ -188,8 +189,8 @@ func main() {
 	// query normalization so cosmetic expr edits don't change rule identity.
 	queryHash := func(expr string) (uint64, error) {
 		var hash uint64
-		if err := ch.ReadConn().QueryRow(context.Background(),
-			"SELECT normalizedQueryHashKeepNames(?)", expr).Scan(&hash); err != nil {
+		row := ch.ReadConn().QueryRow(context.Background(), "SELECT normalizedQueryHashKeepNames(?)", expr)
+		if err := row.Scan(&hash); err != nil {
 			return 0, err
 		}
 		return hash, nil
@@ -246,11 +247,9 @@ func main() {
 	// instances to no rule: resolve them, as a reload does.
 	retirements.Resolve(ctx, time.Now(), rule.Unclaimed(activeAlerts, ruleGroups))
 	for _, g := range ruleGroups {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			g.Start(ctx, notify, store, evalLog)
-		}()
+		})
 	}
 
 	httpSrv.SetReady(true)
@@ -363,6 +362,7 @@ func main() {
 
 				slog.Info("chalert stopped")
 				return
+			default:
 			}
 		}
 	}
@@ -402,11 +402,9 @@ func reloadGroups(
 			}
 		} else {
 			existing[id] = ng
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+			wg.Go(func() {
 				ng.Start(ctx, notify, store, evalLog)
-			}()
+			})
 		}
 	}
 }

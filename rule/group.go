@@ -401,6 +401,7 @@ func (g *Group) applyUpdate(ng *Group) []*AlertingRule {
 			old.expr = nr.expr
 			old.forDur = nr.forDur
 			old.keepFire = nr.keepFire
+			old.hold = nr.hold
 			old.labels = nr.labels
 			old.annTpls = nr.annTpls
 			old.debug = nr.debug

@@ -84,6 +84,35 @@ GROUP BY service
 HAVING value > 100
 ```
 
+### Holding While a Source Is Silent
+
+`keep_firing_for` holds an absent firing instance for a fixed time. A rule that reads
+only recent rows also sees every instance go absent when its collector stops, and would
+read that lost data as recovery. `hold_while_silent` holds an absent firing instance
+while its device's source is silent:
+
+```yaml
+      - alert: InterfaceDown
+        expr: SELECT device, interface, 1 AS value FROM ...
+        hold_while_silent:
+          device_label: device   # instance label naming its device
+          silent_query: |        # one row per device whose source is silent now
+            SELECT device, 1 AS value FROM device_last_seen WHERE last_seen < now() - INTERVAL 3 MINUTE
+          max: 6h                # never hold one instance longer
+```
+
+- The silent query follows the query contract, so it returns a numeric column too. It
+  runs at most once per evaluation, and only when a firing instance went absent.
+- An instance is held when its `device_label` value is in the silent query's
+  `device_label` column, or when the silent query fails. An instance without the label
+  resolves as before.
+- A held instance carries the annotation `chalert_held: source silent since <RFC3339>`.
+  The hold start is persisted, so a restart keeps it, and an instance that matches
+  again clears it.
+- `chalert_alerts_held{group,rule}` counts the held instances.
+- A rule cannot set both `hold_while_silent` and `keep_firing_for`. Adding the block
+  does not change the rule's ID.
+
 ### Annotation Templates
 
 Annotations support Go `text/template` syntax with `.Labels`, `.Value`, and `.Expr` fields. Legacy vmalert-style `$labels` and `$value` variables are also supported.

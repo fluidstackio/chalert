@@ -70,6 +70,9 @@ spec:
             {{- if .Values.config.ruleConfigCheckInterval }}
             - -rule.configCheckInterval={{ .Values.config.ruleConfigCheckInterval }}
             {{- end }}
+            {{- if .Values.config.historyExpr }}
+            - -history.expr={{ .Values.config.historyExpr }}
+            {{- end }}
             - -httpListenAddr=:8880
             {{- $rulePaths := list -}}
             {{- if .Values.rules -}}

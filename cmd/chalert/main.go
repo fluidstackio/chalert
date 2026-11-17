@@ -100,38 +100,42 @@ func main() {
 	flag.Var(&externalLabelsRaw, "external.label", `External label in the form "Name=value". Can be specified multiple times.`)
 	flag.Parse()
 
+	if err := run(); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "chalert: %s\n", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
 	if *rulePaths == "" {
-		fatalf("'-rule' flag is required")
+		return errors.New("'-rule' flag is required")
 	}
 	if *clickhouseDSN == "" && !*dryRun {
-		fatalf("'-clickhouse.dsn' flag is required")
+		return errors.New("'-clickhouse.dsn' flag is required")
 	}
 
-	// Apply resend delay
 	rule.ResendDelay = *resendDelay
 
-	// Parse external labels
 	externalLabels, err := parseExternalLabels(externalLabelsRaw)
 	if err != nil {
-		fatalf("invalid -external.label: %s", err)
+		return fmt.Errorf("invalid -external.label: %w", err)
 	}
 
-	// Parse rules
 	paths := strings.Split(*rulePaths, ";")
 	snap, err := config.ReadSnapshot(paths)
 	if err != nil {
-		fatalf("failed to read rules: %s", err)
+		return fmt.Errorf("failed to read rules: %w", err)
 	}
 	groups, err := snap.Parse()
 	if err != nil {
-		fatalf("failed to parse rules: %s", err)
+		return fmt.Errorf("failed to parse rules: %w", err)
 	}
 	slog.Info("parsed rule groups", "count", len(groups))
 
 	if *dryRun {
 		_, _ = fmt.Fprintf(os.Stdout, "Validation successful: %d groups, %d total rules\n",
 			len(groups), countRules(groups))
-		return
+		return nil
 	}
 
 	// Start HTTP server for health checks, metrics, and version info.
@@ -142,17 +146,82 @@ func main() {
 		}
 	}()
 
-	// Resolve password: file takes precedence over flag.
+	ch, err := connectClickHouse()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = ch.Close() }()
+
+	store := statestore.New(ch.WriteConn(), *clickhouseDB)
+	ctx := context.Background()
+	if err := store.EnsureTables(ctx); err != nil {
+		return fmt.Errorf("failed to create state tables: %w", err)
+	}
+
+	queryHash := normalizedQueryHash(ch)
+	if err := config.NormalizeRuleIDs(groups, queryHash); err != nil {
+		return fmt.Errorf("failed to normalize rule IDs: %w", err)
+	}
+
+	activeAlerts, err := store.LoadActive(ctx)
+	if err != nil {
+		slog.Warn("failed to load active alerts for restoration", "error", err)
+	}
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	retirements := rule.NewRetirements(store)
+	a := &app{
+		ctx:       ctx,
+		paths:     paths,
+		queryHash: queryHash,
+		qb:        datasource.NewQuerierBuilder(ch.ReadConn()),
+		notify:    newNotifier(),
+		store:     store,
+		// The evaluation log rides chalert's log stream (stderr, as slog's
+		// default), which the log collector ships to ClickHouse.
+		evalLog:     rule.NewEvaluationLog(os.Stderr),
+		retirements: retirements,
+		groupOpts: rule.GroupOptions{
+			DefaultInterval: *evaluationInterval,
+			ExternalLabels:  externalLabels,
+			DefaultLimit:    *defaultLimit,
+			Retirements:     retirements,
+		},
+		httpSrv: httpSrv,
+		groups:  make(map[uint64]*rule.Group),
+	}
+	a.start(groups, activeAlerts)
+
+	httpSrv.SetReady(true)
+	slog.Info("chalert started",
+		"version", version,
+		"groups", len(a.groups),
+		"http", *httpAddr,
+		"configCheckInterval", configCheckInterval.String(),
+		"clickhouse", redactDSN(*clickhouseDSN))
+
+	// Periodic checks skip the reload while this fingerprint is unchanged; SIGHUP and /-/reload force it.
+	// Taken from the startup snapshot so it describes exactly the content that was loaded.
+	a.lastFP = snap.Fingerprint()
+	metrics.ConfigLastReloadSuccessful.Set(1)
+
+	a.serve(cancel)
+	return nil
+}
+
+func connectClickHouse() (*chclient.Client, error) {
+	// The password file takes precedence over the flag.
 	password := *clickhousePass
 	if *clickhousePassFile != "" {
 		data, err := os.ReadFile(*clickhousePassFile)
 		if err != nil {
-			fatalf("failed to read -clickhouse.passwordFile: %s", err)
+			return nil, fmt.Errorf("failed to read -clickhouse.passwordFile: %w", err)
 		}
 		password = strings.TrimRight(string(data), "\n\r")
 	}
 
-	// Connect to ClickHouse
 	ch, err := chclient.New(chclient.Config{
 		DSN:      *clickhouseDSN,
 		ReadDSN:  *clickhouseReadDSN,
@@ -173,21 +242,15 @@ func main() {
 		MaxIdleConns:  *maxIdleConns,
 	})
 	if err != nil {
-		fatalf("failed to connect to ClickHouse: %s", err)
+		return nil, fmt.Errorf("failed to connect to ClickHouse: %w", err)
 	}
-	defer func() { _ = ch.Close() }()
+	return ch, nil
+}
 
-	// Ensure state tables exist
-	store := statestore.New(ch.WriteConn(), *clickhouseDB)
-	ctx := context.Background()
-	if err := store.EnsureTables(ctx); err != nil {
-		fatalf("failed to create state tables: %s", err)
-	}
-
-	// Normalize rule IDs using ClickHouse's normalizedQueryHashKeepNames.
-	// This replaces the Go-side whitespace normalization with CH-native
-	// query normalization so cosmetic expr edits don't change rule identity.
-	queryHash := func(expr string) (uint64, error) {
+// normalizedQueryHash hashes rule exprs with ClickHouse's own query
+// normalization, so cosmetic expr edits don't change rule identity.
+func normalizedQueryHash(ch *chclient.Client) func(string) (uint64, error) {
+	return func(expr string) (uint64, error) {
 		var hash uint64
 		row := ch.ReadConn().QueryRow(context.Background(), "SELECT normalizedQueryHashKeepNames(?)", expr)
 		if err := row.Scan(&hash); err != nil {
@@ -195,113 +258,58 @@ func main() {
 		}
 		return hash, nil
 	}
-	if err := config.NormalizeRuleIDs(groups, queryHash); err != nil {
-		fatalf("failed to normalize rule IDs: %s", err)
-	}
+}
 
-	// Load previously active alerts for state restoration
-	activeAlerts, err := store.LoadActive(ctx)
-	if err != nil {
-		slog.Warn("failed to load active alerts for restoration", "error", err)
-	}
-
-	// Set up notifier
-	var notify rule.Notifier
-	if *notifierURLs != "" {
-		urls := strings.Split(*notifierURLs, ",")
-		notify = notifier.New(notifier.Config{
-			URLs:        urls,
-			ExternalURL: *externalURL,
-		})
-	} else {
+func newNotifier() rule.Notifier {
+	if *notifierURLs == "" {
 		slog.Warn("no notifier.url configured — alerts will be evaluated but not sent")
+		return nil
 	}
+	return notifier.New(notifier.Config{
+		URLs:        strings.Split(*notifierURLs, ","),
+		ExternalURL: *externalURL,
+	})
+}
 
-	// Build querier
-	qb := datasource.NewQuerierBuilder(ch.ReadConn())
+// app owns the running rule groups between startup and shutdown.
+type app struct {
+	ctx         context.Context
+	paths       []string
+	queryHash   func(string) (uint64, error)
+	qb          datasource.QuerierBuilder
+	notify      rule.Notifier
+	store       *statestore.Store
+	evalLog     rule.EvaluationRecorder
+	retirements *rule.Retirements
+	groupOpts   rule.GroupOptions
+	httpSrv     *web.Server
 
-	// Start evaluation
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	groups map[uint64]*rule.Group
+	wg     sync.WaitGroup
+	lastFP uint64
+}
 
-	var wg sync.WaitGroup
-	ruleGroups := make(map[uint64]*rule.Group)
-	// The evaluation log rides chalert's log stream (stderr, as slog's
-	// default), which the log collector ships to ClickHouse.
-	evalLog := rule.NewEvaluationLog(os.Stderr)
-
-	retirements := rule.NewRetirements(store)
-	groupOpts := rule.GroupOptions{
-		DefaultInterval: *evaluationInterval,
-		ExternalLabels:  externalLabels,
-		DefaultLimit:    *defaultLimit,
-		Retirements:     retirements,
-	}
-
-	for _, cfg := range groups {
-		g := rule.NewGroup(cfg, qb, groupOpts)
+func (a *app) start(cfgs []config.Group, activeAlerts []rule.AlertInstance) {
+	for _, cfg := range cfgs {
+		g := rule.NewGroup(cfg, a.qb, a.groupOpts)
 		g.RestoreState(activeAlerts)
-		ruleGroups[g.ID()] = g
+		a.groups[g.ID()] = g
 	}
 	// A rule edited or removed while chalert was down left its restored
 	// instances to no rule: resolve them, as a reload does.
-	retirements.Resolve(ctx, time.Now(), rule.Unclaimed(activeAlerts, ruleGroups))
-	for _, g := range ruleGroups {
-		wg.Go(func() {
-			g.Start(ctx, notify, store, evalLog)
+	a.retirements.Resolve(a.ctx, time.Now(), rule.Unclaimed(activeAlerts, a.groups))
+	for _, g := range a.groups {
+		a.wg.Go(func() {
+			g.Start(a.ctx, a.notify, a.store, a.evalLog)
 		})
 	}
+}
 
-	httpSrv.SetReady(true)
-	slog.Info("chalert started",
-		"version", version,
-		"groups", len(ruleGroups),
-		"http", *httpAddr,
-		"configCheckInterval", configCheckInterval.String(),
-		"clickhouse", redactDSN(*clickhouseDSN))
-
-	// Periodic checks skip the reload while this fingerprint is unchanged; SIGHUP and /-/reload force it.
-	// Taken from the startup snapshot so it describes exactly the content that was loaded.
-	lastFP := snap.Fingerprint()
-	metrics.ConfigLastReloadSuccessful.Set(1)
-
-	reload := func(trigger string, force bool) {
-		snap, err := config.ReadSnapshot(paths)
-		if err != nil {
-			slog.Error("failed to read rule files for reload", "trigger", trigger, "error", err)
-			metrics.ConfigReloads.WithLabelValues("error").Inc()
-			metrics.ConfigLastReloadSuccessful.Set(0)
-			return
-		}
-		fp := snap.Fingerprint()
-		if !force && fp == lastFP {
-			return
-		}
-		slog.Info("reloading rules", "trigger", trigger)
-		newGroups, err := snap.Parse()
-		if err != nil {
-			slog.Error("failed to reload rules", "trigger", trigger, "error", err)
-			metrics.ConfigReloads.WithLabelValues("error").Inc()
-			metrics.ConfigLastReloadSuccessful.Set(0)
-			return
-		}
-		if err := config.NormalizeRuleIDs(newGroups, queryHash); err != nil {
-			slog.Error("failed to normalize rule IDs on reload", "trigger", trigger, "error", err)
-			metrics.ConfigReloads.WithLabelValues("error").Inc()
-			metrics.ConfigLastReloadSuccessful.Set(0)
-			return
-		}
-		reloadGroups(ctx, ruleGroups, newGroups, qb, notify, store, evalLog, &wg, groupOpts)
-		lastFP = fp
-		metrics.ConfigReloads.WithLabelValues("success").Inc()
-		metrics.ConfigLastReloadSuccess.SetToCurrentTime()
-		metrics.ConfigLastReloadSuccessful.Set(1)
-		slog.Info("rules reloaded", "trigger", trigger, "groups", len(ruleGroups))
-	}
-
+// serve handles reload triggers until a shutdown signal arrives.
+func (a *app) serve(cancel context.CancelFunc) {
 	// Buffered so requests during an in-flight reload coalesce instead of blocking.
 	reloadRequests := make(chan struct{}, 1)
-	httpSrv.SetReloadFunc(func() {
+	a.httpSrv.SetReloadFunc(func() {
 		select {
 		case reloadRequests <- struct{}{}:
 		default:
@@ -315,57 +323,87 @@ func main() {
 		configCheckCh = ticker.C
 	}
 
-	// Handle signals
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 
 	for {
 		select {
 		case <-configCheckCh:
-			reload("interval", false)
-
+			a.reload("interval", false)
 		case <-reloadRequests:
-			reload("http", true)
-
+			a.reload("http", true)
 		case sig := <-sigCh:
-			switch sig {
-			case syscall.SIGHUP:
-				reload("sighup", true)
-
-			case syscall.SIGINT, syscall.SIGTERM:
-				slog.Info("shutdown signal received", "signal", sig)
-				httpSrv.SetReady(false)
-				cancel()
-				for _, g := range ruleGroups {
-					g.Close()
-				}
-
-				// Wait for groups with a timeout to prevent hanging during rolling restarts.
-				done := make(chan struct{})
-				go func() {
-					wg.Wait()
-					close(done)
-				}()
-				select {
-				case <-done:
-				case <-time.After(*shutdownTimeout):
-					slog.Error("shutdown timeout exceeded, some goroutines did not exit")
-				}
-
-				// Final state persistence
-				persistAllState(context.Background(), ruleGroups, store, retirements)
-
-				// Shut down HTTP server
-				shutCtx, shutCancel := context.WithTimeout(context.Background(), 5*time.Second)
-				_ = httpSrv.Shutdown(shutCtx)
-				shutCancel()
-
-				slog.Info("chalert stopped")
-				return
-			default:
+			if sig == syscall.SIGHUP {
+				a.reload("sighup", true)
+				continue
 			}
+			slog.Info("shutdown signal received", "signal", sig)
+			a.shutdown(cancel)
+			return
 		}
 	}
+}
+
+func (a *app) reload(trigger string, force bool) {
+	snap, err := config.ReadSnapshot(a.paths)
+	if err != nil {
+		reloadFailed("failed to read rule files for reload", trigger, err)
+		return
+	}
+	fp := snap.Fingerprint()
+	if !force && fp == a.lastFP {
+		return
+	}
+	slog.Info("reloading rules", "trigger", trigger)
+	newGroups, err := snap.Parse()
+	if err != nil {
+		reloadFailed("failed to reload rules", trigger, err)
+		return
+	}
+	if err := config.NormalizeRuleIDs(newGroups, a.queryHash); err != nil {
+		reloadFailed("failed to normalize rule IDs on reload", trigger, err)
+		return
+	}
+	reloadGroups(a.ctx, a.groups, newGroups, a.qb, a.notify, a.store, a.evalLog, &a.wg, a.groupOpts)
+	a.lastFP = fp
+	metrics.ConfigReloads.WithLabelValues("success").Inc()
+	metrics.ConfigLastReloadSuccess.SetToCurrentTime()
+	metrics.ConfigLastReloadSuccessful.Set(1)
+	slog.Info("rules reloaded", "trigger", trigger, "groups", len(a.groups))
+}
+
+func reloadFailed(msg, trigger string, err error) {
+	slog.Error(msg, "trigger", trigger, "error", err)
+	metrics.ConfigReloads.WithLabelValues("error").Inc()
+	metrics.ConfigLastReloadSuccessful.Set(0)
+}
+
+func (a *app) shutdown(cancel context.CancelFunc) {
+	a.httpSrv.SetReady(false)
+	cancel()
+	for _, g := range a.groups {
+		g.Close()
+	}
+
+	// Wait for groups with a timeout to prevent hanging during rolling restarts.
+	done := make(chan struct{})
+	go func() {
+		a.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(*shutdownTimeout):
+		slog.Error("shutdown timeout exceeded, some goroutines did not exit")
+	}
+
+	persistAllState(context.Background(), a.groups, a.store, a.retirements)
+
+	shutCtx, shutCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	_ = a.httpSrv.Shutdown(shutCtx)
+	shutCancel()
+
+	slog.Info("chalert stopped")
 }
 
 func reloadGroups(
@@ -459,9 +497,4 @@ func parseExternalLabels(raw []string) (map[string]string, error) {
 		labels[kv[0]] = kv[1]
 	}
 	return labels, nil
-}
-
-func fatalf(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, "chalert: "+format+"\n", args...)
-	os.Exit(1)
 }

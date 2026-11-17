@@ -253,17 +253,46 @@ func (ar *AlertingRule) Exec(ctx context.Context, ts time.Time, limit int) ([]Al
 		"samples", len(res.Data),
 		"duration", duration)
 
-	// Clean up resolved alerts past retention
+	ar.dropExpiredResolved(ts)
+	seen, err := ar.observe(res.Data, ts)
+	if err != nil {
+		return nil, err
+	}
+	numActive := ar.advanceStates(seen, ts)
+
+	if limit > 0 && numActive > limit {
+		// Match vmalert: clear all alerts when limit is exceeded.
+		ar.alerts = make(map[uint64]*AlertInstance)
+		return nil, fmt.Errorf("rule %q: exceeded limit of %d with %d active alerts", ar.name, limit, numActive)
+	}
+
+	toSend := ar.alertsToSend(ts)
+	if len(toSend) > 0 {
+		firing, resolved := countStates(toSend)
+		slog.Info("chalert rule alerts to send",
+			"rule", ar.name,
+			"group", ar.groupName,
+			"total", len(toSend),
+			"firing", firing,
+			"resolved", resolved)
+	}
+	return toSend, nil
+}
+
+// dropExpiredResolved forgets resolved alerts past retention.
+func (ar *AlertingRule) dropExpiredResolved(ts time.Time) {
 	for id, a := range ar.alerts {
 		if a.State == StateInactive && ts.Sub(a.ResolvedAt) > resolvedRetention {
 			delete(ar.alerts, id)
 		}
 	}
+}
 
-	// Track which alerts were seen this evaluation
-	seen := make(map[uint64]struct{})
-
-	for _, m := range res.Data {
+// observe creates or refreshes an alert for each query result and returns
+// the IDs it saw.
+func (ar *AlertingRule) observe(data []datasource.Metric, ts time.Time) (map[uint64]struct{}, error) {
+	seen := make(map[uint64]struct{}, len(data))
+	for _, m := range data {
 		labels := ar.buildLabels(m)
 		alertID := hashLabels(labels)
 
@@ -272,21 +301,9 @@ func (ar *AlertingRule) Exec(ctx context.Context, ts time.Time, limit int) ([]Al
 		}
 		seen[alertID] = struct{}{}
 
-		if a, ok := ar.alerts[alertID]; ok {
-			// Existing alert — update value
-			if a.State == StateInactive {
-				// Was resolved, re-activate
-				a.State = StatePending
-				a.ActiveAt = ts
-				a.ResolvedAt = time.Time{}
-				ar.logDebug(ts, a, "INACTIVE => PENDING")
-			}
-			a.Value = m.Values[0]
-			a.Annotations = ar.renderAnnotations(m, a)
-			a.KeepFiringSince = time.Time{}
-		} else {
-			// New alert
-			a := &AlertInstance{
+		a, ok := ar.alerts[alertID]
+		if !ok {
+			a = &AlertInstance{
 				ID:          alertID,
 				RuleID:      ar.ruleID,
 				GroupName:   ar.groupName,
@@ -301,74 +318,92 @@ func (ar *AlertingRule) Exec(ctx context.Context, ts time.Time, limit int) ([]Al
 			}
 			ar.alerts[alertID] = a
 			ar.logDebug(ts, a, "created in PENDING")
+			continue
 		}
-	}
 
-	// Process alerts not seen this evaluation
+		if a.State == StateInactive {
+			a.State = StatePending
+			a.ActiveAt = ts
+			a.ResolvedAt = time.Time{}
+			ar.logDebug(ts, a, "INACTIVE => PENDING")
+		}
+		a.Value = m.Values[0]
+		a.Annotations = ar.renderAnnotations(m, a)
+		a.KeepFiringSince = time.Time{}
+	}
+	return seen, nil
+}
+
+// advanceStates expires alerts absent from this evaluation and promotes
+// pending ones whose for duration has elapsed. It returns how many alerts
+// are still active.
+func (ar *AlertingRule) advanceStates(seen map[uint64]struct{}, ts time.Time) int {
 	var numActive int
 	for id, a := range ar.alerts {
 		if _, ok := seen[id]; !ok {
-			switch a.State {
-			case StatePending:
-				// Pending alert disappeared — just delete it
-				delete(ar.alerts, id)
-				ar.logDebug(ts, a, "PENDING => DELETED (absent)")
-				continue
-			case StateFiring:
-				if ar.keepFire > 0 {
-					if a.KeepFiringSince.IsZero() {
-						a.KeepFiringSince = ts
-					}
-					if ts.Sub(a.KeepFiringSince) < ar.keepFire {
-						ar.logDebug(ts, a, "KEEP_FIRING for %s since %v", ar.keepFire, a.KeepFiringSince)
-						numActive++
-						continue
-					}
-				}
-				a.State = StateInactive
-				a.ResolvedAt = ts
-				ar.logDebug(ts, a, "FIRING => INACTIVE (absent)")
-				continue
-			default:
+			if ar.expireAbsent(id, a, ts) {
+				numActive++
 			}
-		} else {
-			numActive++
+			continue
 		}
-
-		// Transition Pending → Firing when for duration elapsed
+		numActive++
 		if a.State == StatePending && ts.Sub(a.ActiveAt) >= ar.forDur {
 			a.State = StateFiring
 			a.FiredAt = ts
 			ar.logDebug(ts, a, "PENDING => FIRING after %s", ts.Sub(a.ActiveAt))
 		}
 	}
+	return numActive
+}
 
-	if limit > 0 && numActive > limit {
-		// Match vmalert: clear all alerts when limit is exceeded.
-		ar.alerts = make(map[uint64]*AlertInstance)
-		return nil, fmt.Errorf("rule %q: exceeded limit of %d with %d active alerts", ar.name, limit, numActive)
-	}
-
-	toSend := ar.alertsToSend(ts)
-	if len(toSend) > 0 {
-		var firing, resolved int
-		for _, a := range toSend {
-			switch a.State {
-			case StateFiring:
-				firing++
-			case StateInactive:
-				resolved++
-			default:
-			}
+// expireAbsent handles an alert the query no longer returns, and reports
+// whether it is still active.
+func (ar *AlertingRule) expireAbsent(id uint64, a *AlertInstance, ts time.Time) bool {
+	switch a.State {
+	case StatePending:
+		delete(ar.alerts, id)
+		ar.logDebug(ts, a, "PENDING => DELETED (absent)")
+		return false
+	case StateFiring:
+		if ar.keepFiring(a, ts) {
+			return true
 		}
-		slog.Info("chalert rule alerts to send",
-			"rule", ar.name,
-			"group", ar.groupName,
-			"total", len(toSend),
-			"firing", firing,
-			"resolved", resolved)
+		a.State = StateInactive
+		a.ResolvedAt = ts
+		ar.logDebug(ts, a, "FIRING => INACTIVE (absent)")
+		return false
+	default:
+		return false
 	}
-	return toSend, nil
+}
+
+// keepFiring reports whether an absent firing alert is still within its
+// keep_firing_for window, starting the window on its first absence.
+func (ar *AlertingRule) keepFiring(a *AlertInstance, ts time.Time) bool {
+	if ar.keepFire <= 0 {
+		return false
+	}
+	if a.KeepFiringSince.IsZero() {
+		a.KeepFiringSince = ts
+	}
+	if ts.Sub(a.KeepFiringSince) >= ar.keepFire {
+		return false
+	}
+	ar.logDebug(ts, a, "KEEP_FIRING for %s since %v", ar.keepFire, a.KeepFiringSince)
+	return true
+}
+
+func countStates(alerts []AlertInstance) (firing, resolved int) {
+	for _, a := range alerts {
+		switch a.State {
+		case StateFiring:
+			firing++
+		case StateInactive:
+			resolved++
+		default:
+		}
+	}
+	return firing, resolved
 }
 
 // alertsToSend returns alerts that need to be sent to notifiers.

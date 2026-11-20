@@ -53,6 +53,7 @@ config:
   # -- Reference an existing Secret for ClickHouse DSN
   # The secret must contain a key "dsn" with the full connection string
   existingSecret: ""
+  existingSecretReadDSNKey: ""
 
   # -- Alertmanager URL(s), comma-separated for HA
   notifierURL: ""

@@ -7,7 +7,6 @@ on:
 permissions:
   contents: write
   packages: write
-  pull-requests: write
 
 env:
   REGISTRY: ghcr.io
@@ -21,9 +20,17 @@ jobs:
       tag_name: ${{ steps.release.outputs.tag_name }}
       version: ${{ steps.release.outputs.version }}
     steps:
+      # The org doesn't let GITHUB_TOKEN open pull requests, so release-please
+      # acts as the release-please App instead.
+      - uses: actions/create-github-app-token@v2.2.2
+        id: app_token
+        with:
+          app-id: ${{ secrets.RELEASE_PLEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}
       - uses: googleapis/release-please-action@v4.4.1
         id: release
         with:
+          token: ${{ steps.app_token.outputs.token }}
           release-type: go
 
   build-binaries:

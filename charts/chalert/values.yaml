@@ -56,6 +56,12 @@ config:
 
   # -- Alertmanager URL(s), comma-separated for HA
   notifierURL: ""
+  # -- Labels that keep an alert out of Alertmanager: an alert whose label
+  # equals the value here is evaluated and recorded in alert_history but not
+  # sent. One match is enough. Quote every value: Helm reads an unquoted
+  # number as a float (1000000 renders as 1e+06).
+  notifierDropLabels: {}
+  #   fluidstack_io_deliver: "false"
   # -- External URL for alert source links
   externalURL: ""
   # -- Default evaluation interval

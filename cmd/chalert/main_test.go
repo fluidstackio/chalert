@@ -222,6 +222,42 @@ func TestParseExternalLabels(t *testing.T) {
 	}
 }
 
+func TestParseDropLabels(t *testing.T) {
+	labels, err := parseDropLabels([]string{"notify=false", "env=dev"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if labels["notify"] != "false" || labels["env"] != "dev" {
+		t.Errorf("unexpected labels: %v", labels)
+	}
+
+	for _, bad := range []string{"missing-value", "=value", "name="} {
+		if _, err := parseDropLabels([]string{bad}); err == nil {
+			t.Errorf("expected error for %q", bad)
+		}
+	}
+	if _, err := parseDropLabels([]string{"a=x", "a=y"}); err == nil {
+		t.Error("expected error for a name given twice")
+	}
+	labels, err = parseDropLabels(nil)
+	if err != nil || labels != nil {
+		t.Errorf("expected nil map for no labels, got %v, %v", labels, err)
+	}
+}
+
+func TestCheckDropLabels(t *testing.T) {
+	drop := map[string]string{"notify": "false"}
+	if err := checkDropLabels(drop, map[string]string{"notify": "false"}); err == nil {
+		t.Error("expected error when an external label sets the drop value")
+	}
+	if err := checkDropLabels(drop, map[string]string{"notify": "true", "team": "network"}); err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if err := checkDropLabels(drop, nil); err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
 func TestRedactDSN(t *testing.T) {
 	got := redactDSN("clickhouse://user:secret@host:9000/db")
 	if strings.Contains(got, "secret") {

@@ -187,6 +187,7 @@ A separate read connection can be configured with `-clickhouse.read-dsn` to isol
 | `-clickhouse.maxRowsToRead` | `0` | Max rows per query (0 = unlimited) |
 | `-clickhouse.maxThreads` | `0` | Max threads per query (0 = CH default) |
 | `-notifier.url` | | Alertmanager URL(s), comma-separated |
+| `-notifier.dropLabel` | | Do not send an alert whose label equals this value (`Name=value`, repeatable; one match drops it). The alert is still evaluated and recorded in `alert_history` |
 | `-evaluationInterval` | `1m` | Default group evaluation interval |
 | `-rule.defaultLimit` | `10000` | Default max alert instances per rule |
 | `-rule.configCheckInterval` | `0` | Interval for re-reading rule files and hot-reloading on changes (0 = disabled) |
@@ -226,6 +227,7 @@ Key metrics:
 | `chalert_rule_eval_errors_total` | counter | Rule evaluation errors |
 | `chalert_alerts_active` | gauge | Active alert instances per rule/state |
 | `chalert_notifier_sends_total` | counter | Notification send attempts by URL/result |
+| `chalert_notifier_dropped_total` | counter | Alert notifications not sent because a label matched `-notifier.dropLabel` (a firing alert counts once per resend) |
 | `chalert_config_reloads_total` | counter | Config reload attempts by result |
 | `chalert_retired_rows_pending` | gauge | Resolved history rows of retired rules not yet written |
 | `chalert_config_last_reload_successful` | gauge | Whether the last reload attempt succeeded (1) or failed (0) |

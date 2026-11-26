@@ -51,6 +51,14 @@ type Config struct {
 
 	// BearerToken for auth (optional, mutually exclusive with BasicAuth).
 	BearerToken string
+
+	// DropLabels keeps an alert out of every Alertmanager when one of its
+	// labels is present and equals the value given here; one match is
+	// enough. chalert still evaluates the alert, keeps its state and writes
+	// its alert_history rows. Use it for alerts that exist only for their
+	// history and that Alertmanager would route to no receiver anyway: it
+	// holds every alert it is sent in memory, routed or not.
+	DropLabels map[string]string
 }
 
 // AlertManager sends alerts to Prometheus Alertmanager instances.
@@ -61,6 +69,7 @@ type AlertManager struct {
 	username    string
 	password    string
 	bearerToken string
+	dropLabels  map[string]string
 }
 
 // New returns a notifier that pushes to every Alertmanager in cfg.
@@ -76,12 +85,23 @@ func New(cfg Config) *AlertManager {
 		username:    cfg.Username,
 		password:    cfg.Password,
 		bearerToken: cfg.BearerToken,
+		dropLabels:  cfg.DropLabels,
 	}
 }
 
 // Send implements rule.Notifier. Sends alerts to all configured Alertmanager instances.
 func (am *AlertManager) Send(ctx context.Context, alerts []rule.AlertInstance) error {
-	if len(alerts) == 0 || len(am.urls) == 0 {
+	if len(am.urls) == 0 {
+		return nil
+	}
+	offered := len(alerts)
+	alerts = am.keep(alerts)
+	if dropped := offered - len(alerts); dropped > 0 {
+		slog.Info("chalert notifier: dropped by label",
+			"dropped", dropped,
+			"kept", len(alerts))
+	}
+	if len(alerts) == 0 {
 		return nil
 	}
 
@@ -147,6 +167,34 @@ func (am *AlertManager) Send(ctx context.Context, alerts []rule.AlertInstance) e
 		return fmt.Errorf("notification errors: %v", errs)
 	}
 	return nil
+}
+
+// keep returns the alerts that match none of the drop labels. Each alert it
+// leaves out adds one to chalert_notifier_dropped_total, so a firing alert
+// counts again on every resend.
+func (am *AlertManager) keep(alerts []rule.AlertInstance) []rule.AlertInstance {
+	if len(am.dropLabels) == 0 {
+		return alerts
+	}
+	kept := make([]rule.AlertInstance, 0, len(alerts))
+	for _, a := range alerts {
+		if am.drops(a.Labels) {
+			metrics.NotifierDropped.Inc()
+			continue
+		}
+		kept = append(kept, a)
+	}
+	return kept
+}
+
+// drops reports whether labels holds one of the drop labels with its value.
+func (am *AlertManager) drops(labels map[string]string) bool {
+	for name, value := range am.dropLabels {
+		if v, ok := labels[name]; ok && v == value {
+			return true
+		}
+	}
+	return false
 }
 
 func (am *AlertManager) sendTo(ctx context.Context, url string, payload []byte) error {

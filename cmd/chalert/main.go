@@ -83,6 +83,7 @@ var (
 	httpAddr            = flag.String("httpListenAddr", ":8880", "Address for the HTTP API and UI.")
 	shutdownTimeout     = flag.Duration("shutdownTimeout", 30*time.Second, "Maximum time to wait for graceful shutdown.")
 	externalLabelsRaw   arrayString
+	dropLabelsRaw       arrayString
 
 	// version is set by -ldflags at build time.
 	version = "dev"
@@ -98,6 +99,7 @@ var (
 
 func main() {
 	flag.Var(&externalLabelsRaw, "external.label", `External label in the form "Name=value". Can be specified multiple times.`)
+	flag.Var(&dropLabelsRaw, "notifier.dropLabel", `Do not send an alert whose label Name equals value, in the form "Name=value". Can be specified multiple times; one match drops the alert. chalert still evaluates the alert and writes its alert_history rows.`)
 	flag.Parse()
 
 	if err := run(); err != nil {
@@ -119,6 +121,13 @@ func run() error {
 	externalLabels, err := parseExternalLabels(externalLabelsRaw)
 	if err != nil {
 		return fmt.Errorf("invalid -external.label: %w", err)
+	}
+	dropLabels, err := parseDropLabels(dropLabelsRaw)
+	if err != nil {
+		return fmt.Errorf("invalid -notifier.dropLabel: %w", err)
+	}
+	if err := checkDropLabels(dropLabels, externalLabels); err != nil {
+		return err
 	}
 
 	paths := strings.Split(*rulePaths, ";")
@@ -177,7 +186,7 @@ func run() error {
 		paths:     paths,
 		queryHash: queryHash,
 		qb:        datasource.NewQuerierBuilder(ch.ReadConn()),
-		notify:    newNotifier(),
+		notify:    newNotifier(dropLabels),
 		store:     store,
 		// The evaluation log rides chalert's log stream (stderr, as slog's
 		// default), which the log collector ships to ClickHouse.
@@ -260,14 +269,18 @@ func normalizedQueryHash(ch *chclient.Client) func(string) (uint64, error) {
 	}
 }
 
-func newNotifier() rule.Notifier {
+func newNotifier(dropLabels map[string]string) rule.Notifier {
 	if *notifierURLs == "" {
 		slog.Warn("no notifier.url configured — alerts will be evaluated but not sent")
+		if len(dropLabels) > 0 {
+			slog.Warn("-notifier.dropLabel has no effect without -notifier.url")
+		}
 		return nil
 	}
 	return notifier.New(notifier.Config{
 		URLs:        strings.Split(*notifierURLs, ","),
 		ExternalURL: *externalURL,
+		DropLabels:  dropLabels,
 	})
 }
 
@@ -497,4 +510,36 @@ func parseExternalLabels(raw []string) (map[string]string, error) {
 		labels[kv[0]] = kv[1]
 	}
 	return labels, nil
+}
+
+// parseDropLabels parses repeatable -notifier.dropLabel=Name=value flags into
+// a map. The value must not be empty: chalert drops a query column whose value
+// is empty, so such a flag would match nothing a query returns.
+func parseDropLabels(raw []string) (map[string]string, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	labels := make(map[string]string, len(raw))
+	for _, pair := range raw {
+		kv := strings.SplitN(pair, "=", 2)
+		if len(kv) != 2 || kv[0] == "" || kv[1] == "" {
+			return nil, fmt.Errorf("invalid drop label %q: expected Name=value with a non-empty value", pair)
+		}
+		if prev, ok := labels[kv[0]]; ok {
+			return nil, fmt.Errorf("drop label %q is given twice (%q and %q): one value per name", kv[0], prev, kv[1])
+		}
+		labels[kv[0]] = kv[1]
+	}
+	return labels, nil
+}
+
+// checkDropLabels refuses a drop label that an external label sets to the same
+// value: every alert carries the external labels, so chalert would send none.
+func checkDropLabels(drop, external map[string]string) error {
+	for name, value := range drop {
+		if external[name] == value {
+			return fmt.Errorf("-notifier.dropLabel %s=%s matches -external.label %s=%s, so no alert would be sent", name, value, name, value)
+		}
+	}
+	return nil
 }

@@ -47,6 +47,15 @@ var (
 		Help:      "Total number of notification errors.",
 	})
 
+	// NotifierDropped counts alert notifications the notifier did not send
+	// because a label matched -notifier.dropLabel. A firing alert counts once
+	// per resend, not once per instance.
+	NotifierDropped = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "chalert",
+		Name:      "notifier_dropped_total",
+		Help:      "Total number of alert notifications not sent because a label matched -notifier.dropLabel.",
+	})
+
 	// ConfigReloads counts config reload attempts.
 	ConfigReloads = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "chalert",
@@ -85,6 +94,7 @@ func init() {
 		AlertsActive,
 		NotifierSends,
 		NotifierErrors,
+		NotifierDropped,
 		ConfigReloads,
 		RetiredRowsPending,
 		ConfigLastReloadSuccess,

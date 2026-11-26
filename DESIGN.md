@@ -73,7 +73,7 @@ The examples demonstrate this pattern.
 ### Alert State Persistence
 
 - In-memory state (rule package) is authoritative during runtime
-- ClickHouse `alert_state` table is written to periodically for crash recovery
+- ClickHouse `alert_state` is written at shutdown for every instance in memory, and during runtime for each instance that ends, as inactive
 - `alert_history` table is append-only audit log with 90-day TTL
 - On restart, active alerts are loaded from `alert_state FINAL`
 

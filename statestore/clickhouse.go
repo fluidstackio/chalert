@@ -6,7 +6,8 @@
 //
 //  1. alert_state — ReplacingMergeTree keyed by (rule_id, alert_hash).
 //     This is the "current state" table used for restart recovery.
-//     Written to periodically (not on every evaluation) to avoid excessive writes.
+//     Written at shutdown for every instance in memory, and during runtime for
+//     each instance that ends, as inactive, so a restart never loads it again.
 //
 //  2. alert_history — MergeTree append-only audit log.
 //     Every state transition gets a row. TTL'd at 90 days by default.

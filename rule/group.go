@@ -232,9 +232,29 @@ func (g *Group) evaluate(ctx context.Context, ts time.Time, notifier Notifier, s
 			}
 		}
 	}
+	g.saveEnded(ctx, rules, store)
 	// Every evaluation is recorded, whether or not it produced alerts.
 	if evalLog != nil && len(evals) > 0 {
 		evalLog.RecordEvaluations(evals)
+	}
+}
+
+// saveEnded saves as inactive the instances the evaluation ended. The state
+// saved at shutdown holds only the instances still in memory, so without
+// this a restart, or a kill that skips the shutdown save, would load an
+// ended instance as it was last saved. A failed save is not retried: the
+// restart loads the instance, and its first evaluation ends it again.
+func (g *Group) saveEnded(ctx context.Context, rules []*AlertingRule, store StateStore) {
+	var ended []AlertInstance
+	for _, r := range rules {
+		ended = append(ended, r.TakeEnded()...)
+	}
+	if store == nil || len(ended) == 0 {
+		return
+	}
+	if err := store.Save(ctx, ended); err != nil {
+		slog.Error("chalert saving ended instances as inactive failed",
+			"group", g.Name, "count", len(ended), "error", err)
 	}
 }
 
@@ -432,7 +452,8 @@ func (g *Group) Retire(ctx context.Context) {
 	g.retireRules(ctx, rules)
 }
 
-// retireRules resolves every firing instance of rules that stopped running.
+// retireRules retires every pending and firing instance of rules that
+// stopped running.
 func (g *Group) retireRules(ctx context.Context, rules []*AlertingRule) {
 	var all []AlertInstance
 	for _, r := range rules {
@@ -445,10 +466,9 @@ func (g *Group) retireRules(ctx context.Context, rules []*AlertingRule) {
 	g.retire.Resolve(ctx, time.Now(), all)
 }
 
-// Unclaimed returns the firing instances among a restart's restored state
-// whose rule ID matches no rule of the groups: a rule edited or removed
-// while chalert was down. Pending instances wrote no firing row and are
-// left out.
+// Unclaimed returns the pending and firing instances among a restart's
+// restored state whose rule ID matches no rule of the groups: a rule edited
+// or removed while chalert was down.
 func Unclaimed(instances []AlertInstance, groups map[uint64]*Group) []AlertInstance {
 	ids := map[uint64]bool{}
 	for _, g := range groups {
@@ -458,7 +478,7 @@ func Unclaimed(instances []AlertInstance, groups map[uint64]*Group) []AlertInsta
 	}
 	var out []AlertInstance
 	for _, inst := range instances {
-		if inst.State == StateFiring && !ids[inst.RuleID] {
+		if (inst.State == StatePending || inst.State == StateFiring) && !ids[inst.RuleID] {
 			out = append(out, inst)
 		}
 	}

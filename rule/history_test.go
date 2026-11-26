@@ -162,17 +162,18 @@ func TestRetireResolvesARemovedGroupsFiringInstances(t *testing.T) {
 	}
 }
 
-// At startup, restored firing instances whose rule ID no rule carries are
-// unclaimed; pending ones wrote no firing row and are left out.
-func TestUnclaimedIsTheFiringStateOfNoRule(t *testing.T) {
+// At startup, restored pending and firing instances whose rule ID no rule
+// carries are unclaimed.
+func TestUnclaimedIsTheActiveStateOfNoRule(t *testing.T) {
 	g := evalGroup(1, firingRule(1))
 	got := Unclaimed([]AlertInstance{
 		{ID: 10, RuleID: 1, State: StateFiring},
 		{ID: 11, RuleID: 9, State: StateFiring},
 		{ID: 12, RuleID: 9, State: StatePending},
+		{ID: 13, RuleID: 9, State: StateInactive},
 	}, map[uint64]*Group{g.ID(): g})
-	if len(got) != 1 || got[0].ID != 11 {
-		t.Errorf("unclaimed = %+v, want only instance 11", got)
+	if len(got) != 2 || got[0].ID != 11 || got[1].ID != 12 {
+		t.Errorf("unclaimed = %+v, want instances 11 and 12", got)
 	}
 }
 

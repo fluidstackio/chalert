@@ -178,6 +178,11 @@ type AlertingRule struct {
 	querier       datasource.Querier
 	groupInterval time.Duration
 	alerts        map[uint64]*AlertInstance
+	// ended holds, as inactive, the instances that stopped being pending
+	// or firing since the group last took them (TakeEnded), for the group
+	// to save. The state saved at shutdown no longer holds them, so
+	// without this row a restart would load them as they were last saved.
+	ended []AlertInstance
 
 	// lastEvaluation tracks recent evaluation state for debugging.
 	lastEval     time.Time
@@ -262,6 +267,9 @@ func (ar *AlertingRule) Exec(ctx context.Context, ts time.Time, limit int) ([]Al
 
 	if limit > 0 && numActive > limit {
 		// Match vmalert: clear all alerts when limit is exceeded.
+		for _, a := range ar.alerts {
+			ar.end(*a, ts)
+		}
 		ar.alerts = make(map[uint64]*AlertInstance)
 		return nil, fmt.Errorf("rule %q: exceeded limit of %d with %d active alerts", ar.name, limit, numActive)
 	}
@@ -362,6 +370,7 @@ func (ar *AlertingRule) expireAbsent(id uint64, a *AlertInstance, ts time.Time) 
 	switch a.State {
 	case StatePending:
 		delete(ar.alerts, id)
+		ar.end(*a, ts)
 		ar.logDebug(ts, a, "PENDING => DELETED (absent)")
 		return false
 	case StateFiring:
@@ -370,11 +379,30 @@ func (ar *AlertingRule) expireAbsent(id uint64, a *AlertInstance, ts time.Time) 
 		}
 		a.State = StateInactive
 		a.ResolvedAt = ts
+		ar.end(*a, ts)
 		ar.logDebug(ts, a, "FIRING => INACTIVE (absent)")
 		return false
 	default:
 		return false
 	}
+}
+
+// end keeps a, as inactive since ts, for the group to save.
+func (ar *AlertingRule) end(a AlertInstance, ts time.Time) {
+	if a.State != StateInactive {
+		a.State = StateInactive
+		a.ResolvedAt = ts
+	}
+	ar.ended = append(ar.ended, a)
+}
+
+// TakeEnded returns the instances ended since the last call, as inactive.
+func (ar *AlertingRule) TakeEnded() []AlertInstance {
+	ar.mu.Lock()
+	defer ar.mu.Unlock()
+	out := ar.ended
+	ar.ended = nil
+	return out
 }
 
 // keepFiring reports whether an absent firing alert is still within its

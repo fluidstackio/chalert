@@ -454,8 +454,8 @@ func persistAllState(ctx context.Context, groups map[uint64]*rule.Group, store r
 			all = append(all, r.GetAlerts()...)
 		}
 	}
-	// Retired instances whose resolved rows are unwritten are saved as
-	// firing, so the restart resolves them (rule.Retirements).
+	// Retired instances whose retirement is unwritten are saved as they
+	// were, so the restart resolves them (rule.Retirements).
 	all = append(all, retirements.Unwritten()...)
 	if len(all) > 0 {
 		if err := store.Save(ctx, all); err != nil {

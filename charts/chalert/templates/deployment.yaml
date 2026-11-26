@@ -59,6 +59,12 @@ spec:
             {{- if .Values.config.notifierURL }}
             - -notifier.url={{ .Values.config.notifierURL }}
             {{- end }}
+            {{- range $name, $value := .Values.config.notifierDropLabels }}
+            {{- if eq (toString $value) "" }}
+            {{- fail (printf "config.notifierDropLabels.%s needs a non-empty value" $name) }}
+            {{- end }}
+            - {{ printf "-notifier.dropLabel=%s=%s" $name (toString $value) | quote }}
+            {{- end }}
             {{- if .Values.config.externalURL }}
             - -external.url={{ .Values.config.externalURL }}
             {{- end }}
